@@ -34,6 +34,15 @@ pi install . --local
 
 Run that from this local fork checkout, then restart Pi in the project. The extension auto-connects to the broker on startup and registers the bundled `pi-intercom` skill for common coordination patterns.
 
+## Development
+
+```bash
+npm run typecheck
+npm test
+```
+
+`typecheck` validates the extension against the current `@earendil-works` Pi runtime packages.
+
 **Recommended:** Add this snippet to your project's `AGENTS.md` to help agents understand when to coordinate across sessions:
 
 ```xml

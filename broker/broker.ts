@@ -201,8 +201,12 @@ class IntercomBroker {
       }
 
       case "unregister": {
-        this.sessions.delete(currentId);
-        this.broadcast({ type: "session_left", sessionId: currentId }, currentId);
+        if (currentId === null) {
+          throw new Error("Received unregister before register");
+        }
+        const sessionId = currentId;
+        this.sessions.delete(sessionId);
+        this.broadcast({ type: "session_left", sessionId }, sessionId);
         setId(null);
         this.scheduleShutdownCheck();
         break;
@@ -227,6 +231,15 @@ class IntercomBroker {
             type: "delivery_failed",
             messageId,
             reason: "Invalid message format",
+          });
+          break;
+        }
+
+        if (currentId === null) {
+          writeMessage(socket, {
+            type: "delivery_failed",
+            messageId: message.id,
+            reason: "Sender session not found",
           });
           break;
         }
@@ -269,6 +282,9 @@ class IntercomBroker {
       }
 
       case "presence": {
+        if (currentId === null) {
+          throw new Error("Received presence before register");
+        }
         const session = this.sessions.get(currentId);
         if (session) {
           if (clientMessage.name !== undefined) {

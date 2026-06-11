@@ -82,6 +82,32 @@ export class ReplyTracker {
     this.activeAgentContext = null;
   }
 
+  expireSender(sessionId: string): number {
+    let expired = 0;
+    for (const [messageId, context] of this.pendingAsks) {
+      if (context.from.id === sessionId) {
+        this.pendingAsks.delete(messageId);
+        expired += 1;
+      }
+    }
+    const beforeQueued = this.pendingTurnContexts.length;
+    for (let index = this.pendingTurnContexts.length - 1; index >= 0; index -= 1) {
+      if (this.pendingTurnContexts[index]?.from.id === sessionId) {
+        this.pendingTurnContexts.splice(index, 1);
+      }
+    }
+    expired += beforeQueued - this.pendingTurnContexts.length;
+    if (this.currentTurnContext?.from.id === sessionId) {
+      this.currentTurnContext = null;
+      expired += 1;
+    }
+    if (this.activeAgentContext?.from.id === sessionId) {
+      this.activeAgentContext = null;
+      expired += 1;
+    }
+    return expired;
+  }
+
   resolveReplyTarget(options: { to?: string; replyTo?: string }, now = Date.now()): IntercomContext {
     this.pruneExpired(now);
 

@@ -1,7 +1,9 @@
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "crypto";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
-import { Text } from "@mariozechner/pi-tui";
+import { Text } from "@earendil-works/pi-tui";
 import { IntercomClient } from "./broker/client.ts";
 import { spawnBrokerIfNeeded } from "./broker/spawn.ts";
 import { SessionListOverlay } from "./ui/session-list.ts";
@@ -25,6 +27,7 @@ const SUBAGENT_RUN_ID_ENV = "PI_SUBAGENT_RUN_ID";
 const SUBAGENT_CHILD_AGENT_ENV = "PI_SUBAGENT_CHILD_AGENT";
 const SUBAGENT_CHILD_INDEX_ENV = "PI_SUBAGENT_CHILD_INDEX";
 const SUBAGENT_INTERCOM_SESSION_NAME_ENV = "PI_SUBAGENT_INTERCOM_SESSION_NAME";
+const PACKAGE_ROOT = fileURLToPath(new URL(".", import.meta.url));
 
 interface ChildOrchestratorMetadata {
   orchestratorTarget: string;
@@ -426,6 +429,12 @@ function previewText(value: unknown, maxLength = 72): string | undefined {
 function firstTextContent(result: { content?: Array<{ type: string; text?: string }> }): string {
   return result.content?.find((item) => item.type === "text" && typeof item.text === "string")?.text?.replace(/\*\*/g, "") ?? "";
 }
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+function localForkStartCommand(): string {
+  return `pi --name worker --extension ${shellQuote(path.join(PACKAGE_ROOT, "index.ts"))} --skill ${shellQuote(path.join(PACKAGE_ROOT, "skills"))}`;
+}
 export default function piIntercomExtension(pi: ExtensionAPI) {
   let client: IntercomClient | null = null;
   const config: IntercomConfig = loadConfig();
@@ -718,6 +727,17 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       }
       handleIncomingMessage(liveContext, from, message);
     });
+    nextClient.on("session_left", (sessionId: string) => {
+      if (client !== nextClient) {
+        return;
+      }
+      replyTracker.expireSender(sessionId);
+      for (let index = pendingIdleMessages.length - 1; index >= 0; index -= 1) {
+        if (pendingIdleMessages[index]?.from.id === sessionId) {
+          pendingIdleMessages.splice(index, 1);
+        }
+      }
+    });
     nextClient.on("disconnected", (error: Error) => {
       if (client !== nextClient) {
         return;
@@ -768,7 +788,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     if (reconnectPromise && reconnectPromiseGeneration === generationAtStart) {
       return reconnectPromise;
     }
-    const nextReconnectPromise = (async () => {
+    let nextReconnectPromise!: Promise<IntercomClient>;
+    nextReconnectPromise = (async () => {
       const nextClient = new IntercomClient();
       client = nextClient;
       attachClientHandlers(nextClient);
@@ -1343,7 +1364,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         }
         return new Text(text, 0, 0);
       },
-    });
+    } as never);
   }
 
   pi.registerTool({
@@ -1418,7 +1439,7 @@ Usage:
             const duplicates = duplicateSessionNames(sessions);
             const currentSection = `**Current session:**\n${formatSessionListRow(currentSession, currentSession.cwd, true, duplicates, sessions)}`;
             const otherSection = otherSessions.length === 0
-              ? "**Other sessions:**\nNo other sessions connected. Start another intercom-enabled session with `pi --name worker`, then run `intercom({ action: \"list\" })` again. If you are dogfooding this local fork without installing it, start the peer with `pi --name worker --extension ./index.ts --skill ./skills`."
+              ? `**Other sessions:**\nNo other sessions connected. Start another intercom-enabled session with \`pi --name worker\`, then run \`intercom({ action: \"list\" })\` again. If you are dogfooding this local fork without installing it, start the peer with \`${localForkStartCommand()}\`.`
               : `**Other sessions:**\n${otherSessions.map(s => formatSessionListRow(s, currentSession.cwd, false, duplicates, sessions)).join("\n")}`;
 
             return {
@@ -1750,7 +1771,7 @@ Usage:
       }
       return new Text(text, 0, 0);
     },
-  });
+  } as never);
 
   async function openIntercomOverlay(ctx: ExtensionContext): Promise<void> {
     const overlayGeneration = runtimeGeneration;

@@ -99,7 +99,7 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 - Declared the extension entry in `package.json` via `pi.extensions` so `pi install npm:pi-intercom` can discover and load the extension from the npm package.
 
 ### Changed
-- Added `pi-package` package metadata plus peer dependency declarations for every Pi runtime package the extension imports, including `@mariozechner/pi-tui`.
+- Added `pi-package` package metadata plus peer dependency declarations for every Pi runtime package the extension imports, now using the `@earendil-works` Pi package scope.
 
 ## [0.1.8] - 2026-04-14
 

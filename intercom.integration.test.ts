@@ -4,7 +4,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { EventEmitter, once } from "node:events";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
+import type { Readable } from "node:stream";
 import { ReplyTracker } from "./reply-tracker.ts";
 import { ComposeOverlay } from "./ui/compose.ts";
 import type { Message, SessionInfo } from "./types.ts";
@@ -29,7 +30,9 @@ process.on("exit", () => {
   rmSync(sharedHomeDir, { recursive: true, force: true });
 });
 
-async function waitForBrokerReady(broker: ChildProcessWithoutNullStreams): Promise<void> {
+type BrokerProcess = ChildProcessByStdio<null, Readable, Readable>;
+
+async function waitForBrokerReady(broker: BrokerProcess): Promise<void> {
   const ready = new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => {
       cleanup();
@@ -196,7 +199,7 @@ async function setupBroker() {
   return broker;
 }
 
-async function stopBroker(broker: ChildProcessWithoutNullStreams): Promise<void> {
+async function stopBroker(broker: BrokerProcess): Promise<void> {
   broker.kill("SIGTERM");
   await once(broker, "exit").catch(() => undefined);
 }
@@ -381,7 +384,7 @@ test("intercom tool empty list output gives local fork next steps", { concurrenc
     const text = result.content[0]?.text ?? "";
     assert.match(text, /No other sessions connected/);
     assert.match(text, /pi --name worker/);
-    assert.match(text, /--extension \.\/index\.ts --skill \.\/skills/);
+    assert.match(text, new RegExp(`--extension '${repoDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/index\\.ts' --skill '${repoDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/skills'`));
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await stopBroker(broker);
@@ -409,6 +412,38 @@ test("incoming reply hints are shown for asks but not fire-and-forget sends", { 
     assert.match(harness.sentMessages[1]?.message.content ?? "", /Need answer/);
     assert.match(harness.sentMessages[1]?.message.content ?? "", /To reply/);
     assert.deepEqual(harness.sentMessages[1]?.options, { triggerTurn: true });
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("pending ask is expired when sender disconnects before reply", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("disconnect-expiry-worker", { hasUI: true });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const target = await waitForSessionByName(planner, "disconnect-expiry-worker");
+
+    await planner.send(target.id, { messageId: "disconnecting-ask", text: "Need answer", expectsReply: true });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.match(harness.sentMessages[0]?.message.content ?? "", /Need answer/);
+
+    await planner.disconnect();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const result = await intercomTool.execute("reply-after-disconnect", {
+      action: "reply",
+      message: "normal reply",
+    }, new AbortController().signal, undefined, harness.ctx);
+
+    assert.equal(result.isError, true);
+    assert.match(result.content[0]?.text ?? "", /No active intercom context to reply to/);
+    assert.doesNotMatch(result.content[0]?.text ?? "", /Session not found|not delivered/);
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await cleanup();
@@ -785,7 +820,7 @@ test("intercom tool accepts displayed short IDs when session names are duplicate
 });
 
 test("compose overlay preserves pasted multiline handoffs and can send ask-mode messages", async () => {
-  const sent: Array<{ to: string; text: string; expectsReply?: boolean }> = [];
+  const sent: Array<{ to: string; text: string; expectsReply: boolean | undefined }> = [];
   let renderRequests = 0;
   let doneResult: unknown;
   const keybindings = {
@@ -807,7 +842,7 @@ test("compose overlay preserves pasted multiline handoffs and can send ask-mode 
     keybindings as never,
     { id: "target-session", name: "worker", cwd: repoDir, model: "test-model", pid: 1, startedAt: 0, lastActivity: 0 } as SessionInfo,
     "worker",
-    { send: async (to: string, options: { text: string; expectsReply?: boolean }) => {
+    { send: async (to: string, options: { text: string; expectsReply: boolean }) => {
       sent.push({ to, text: options.text, expectsReply: options.expectsReply });
       return { id: "message-1", delivered: true };
     } } as never,
@@ -836,7 +871,7 @@ test("compose overlay preserves pasted multiline handoffs and can send ask-mode 
     keybindings as never,
     { id: "target-session", name: "worker", cwd: repoDir, model: "test-model", pid: 1, startedAt: 0, lastActivity: 0 } as SessionInfo,
     "worker",
-    { send: async (to: string, options: { text: string; expectsReply?: boolean }) => {
+    { send: async (to: string, options: { text: string; expectsReply: boolean }) => {
       sent.push({ to, text: options.text, expectsReply: options.expectsReply });
       return { id: "message-2", delivered: true };
     } } as never,
@@ -859,7 +894,7 @@ test("compose overlay preserves pasted multiline handoffs and can send ask-mode 
     keybindings as never,
     { id: "target-session", name: "worker", cwd: repoDir, model: "test-model", pid: 1, startedAt: 0, lastActivity: 0 } as SessionInfo,
     "worker",
-    { send: async (to: string, options: { text: string; expectsReply?: boolean }) => {
+    { send: async (to: string, options: { text: string; expectsReply: boolean }) => {
       sent.push({ to, text: options.text, expectsReply: options.expectsReply });
       return { id: "message-3", delivered: true };
     } } as never,
@@ -877,7 +912,7 @@ test("compose overlay preserves pasted multiline handoffs and can send ask-mode 
     keybindings as never,
     { id: "target-session", name: "worker", cwd: repoDir, model: "test-model", pid: 1, startedAt: 0, lastActivity: 0 } as SessionInfo,
     "worker",
-    { send: async (to: string, options: { text: string; expectsReply?: boolean }) => {
+    { send: async (to: string, options: { text: string; expectsReply: boolean }) => {
       sent.push({ to, text: options.text, expectsReply: options.expectsReply });
       return { id: "message-4", delivered: true };
     } } as never,
@@ -901,7 +936,7 @@ test("compose overlay preserves pasted multiline handoffs and can send ask-mode 
     keybindings as never,
     { id: "target-session", name: "worker", cwd: repoDir, model: "test-model", pid: 1, startedAt: 0, lastActivity: 0 } as SessionInfo,
     "worker",
-    { send: async (to: string, options: { text: string; expectsReply?: boolean }) => {
+    { send: async (to: string, options: { text: string; expectsReply: boolean }) => {
       sent.push({ to, text: options.text, expectsReply: options.expectsReply });
       return { id: "message-5", delivered: true };
     } } as never,

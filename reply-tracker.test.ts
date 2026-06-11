@@ -141,3 +141,22 @@ test("reply removes pending ask after successful reply", () => {
 
   assert.deepEqual(tracker.listPending(1001), []);
 });
+
+test("reply expires pending and active asks when sender disconnects", () => {
+  const tracker = new ReplyTracker();
+  const planner = createSession("planner-id", "planner");
+  const reviewer = createSession("reviewer-id", "reviewer");
+  const current = tracker.recordIncomingMessage(planner, createMessage("ask-1", "Need a decision"), 1000);
+  const queued = tracker.recordIncomingMessage(planner, createMessage("ask-2", "Queued decision"), 1001);
+  tracker.recordIncomingMessage(reviewer, createMessage("ask-3", "Still connected"), 1002);
+  tracker.queueTurnContext(current);
+  tracker.queueTurnContext(queued);
+  tracker.beginTurn(1003);
+
+  tracker.expireSender("planner-id");
+
+  assert.deepEqual(tracker.listPending(1004).map((context) => context.message.id), ["ask-3"]);
+  assert.throws(() => tracker.resolveReplyTarget({ replyTo: "ask-1" }, 1004), /No pending ask/);
+  assert.throws(() => tracker.resolveReplyTarget({ replyTo: "ask-2" }, 1004), /No pending ask/);
+  assert.equal(tracker.resolveReplyTarget({}, 1004).message.id, "ask-3");
+});

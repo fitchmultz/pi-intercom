@@ -2,6 +2,7 @@ import type { Component } from "@mariozechner/pi-tui";
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import type { KeybindingsManager, Theme } from "@mariozechner/pi-coding-agent";
 import type { SessionInfo } from "../types.js";
+import { formatSessionTarget } from "../session-targets.js";
 
 function middleTruncate(text: string, maxWidth: number): string {
   if (visibleWidth(text) <= maxWidth) {
@@ -29,28 +30,12 @@ function middleTruncate(text: string, maxWidth: number): string {
   return truncateToWidth(`${left}…${right}`, maxWidth, "");
 }
 
-function sessionTarget(session: SessionInfo, allSessions: SessionInfo[]): string {
-  const normalizedIds = allSessions.map((candidate) => candidate.id.toLowerCase());
-  const normalizedNames = new Set(allSessions
-    .map((candidate) => candidate.name?.toLowerCase())
-    .filter((name): name is string => Boolean(name)));
-  const id = session.id.toLowerCase();
-  for (let length = 8; length < session.id.length; length += 1) {
-    const prefix = id.slice(0, length);
-    const uniqueIdPrefix = normalizedIds.filter((candidateId) => candidateId.startsWith(prefix)).length === 1;
-    if (uniqueIdPrefix && !normalizedNames.has(prefix)) {
-      return session.id.slice(0, length);
-    }
-  }
-  return session.id;
-}
-
 function sessionTitle(session: SessionInfo, allSessions: SessionInfo[], options?: { self?: boolean; sameCwd?: boolean }): string {
   const name = session.name || "Unnamed session";
   const tags = [options?.self ? "self" : undefined, options?.sameCwd ? "same cwd" : undefined]
     .filter((tag): tag is string => Boolean(tag));
   const suffix = tags.length ? ` [${tags.join(", ")}]` : "";
-  return `${name} (${sessionTarget(session, allSessions)})${suffix}`;
+  return `${name} (${formatSessionTarget(session, allSessions)})${suffix}`;
 }
 
 export class SessionListOverlay implements Component {

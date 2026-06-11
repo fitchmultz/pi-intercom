@@ -1,4 +1,5 @@
 import type { Message, SessionInfo } from "./types.ts";
+import { formatSessionTarget, resolveSessionTarget, shortSessionId } from "./session-targets.ts";
 
 export interface IntercomContext {
   from: SessionInfo;
@@ -6,44 +7,20 @@ export interface IntercomContext {
   receivedAt: number;
 }
 
-function matchesPendingSender(context: IntercomContext, to: string): boolean {
-  const target = to.trim().toLowerCase();
-  const senderId = context.from.id.toLowerCase();
-  if (senderId === target || senderId.startsWith(target)) {
-    return true;
-  }
-
-  return context.from.name?.toLowerCase() === target;
-}
-
 function resolveBySenderTarget(contexts: IntercomContext[], to: string): IntercomContext[] {
-  const target = to.trim().toLowerCase();
-  const exactIdMatches = contexts.filter((context) => context.from.id.toLowerCase() === target);
-  if (exactIdMatches.length > 0) {
-    return exactIdMatches;
+  const sessions = contexts.map((context) => context.from);
+  const resolution = resolveSessionTarget(sessions, to);
+  if (resolution.status === "none") {
+    return [];
   }
-  return contexts.filter((context) => matchesPendingSender(context, to));
-}
-
-function pendingSenderTarget(context: IntercomContext, contexts: IntercomContext[]): string {
-  const normalizedIds = contexts.map((candidate) => candidate.from.id.toLowerCase());
-  const normalizedNames = new Set(contexts
-    .map((candidate) => candidate.from.name?.toLowerCase())
-    .filter((name): name is string => Boolean(name)));
-  const id = context.from.id.toLowerCase();
-  for (let length = 8; length < context.from.id.length; length += 1) {
-    const prefix = id.slice(0, length);
-    const uniqueIdPrefix = normalizedIds.filter((candidateId) => candidateId.startsWith(prefix)).length === 1;
-    if (uniqueIdPrefix && !normalizedNames.has(prefix)) {
-      return context.from.id.slice(0, length);
-    }
-  }
-  return context.from.id;
+  const matchingIds = new Set(resolution.matches.map((session) => session.id));
+  return contexts.filter((context) => matchingIds.has(context.from.id));
 }
 
 function pendingSenderOptions(contexts: IntercomContext[], allContexts: IntercomContext[] = contexts): string {
+  const allSenders = allContexts.map((context) => context.from);
   return contexts
-    .map((context) => `${context.from.name || context.from.id.slice(0, 8)} (${pendingSenderTarget(context, allContexts)}, replyTo: ${context.message.id})`)
+    .map((context) => `${context.from.name || shortSessionId(context.from.id)} (${formatSessionTarget(context.from, allSenders)}, replyTo: ${context.message.id})`)
     .join(", ");
 }
 

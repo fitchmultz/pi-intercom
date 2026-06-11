@@ -51,7 +51,7 @@ test("reply with to resolves matching pending ask", () => {
 
   assert.equal(tracker.resolveReplyTarget({ to: "reviewer" }, 1002).message.id, "ask-2");
   assert.equal(tracker.resolveReplyTarget({ to: "planner-id" }, 1002).message.id, "ask-1");
-  assert.equal(tracker.resolveReplyTarget({ to: "review" }, 1002).message.id, "ask-2");
+  assert.throws(() => tracker.resolveReplyTarget({ to: "review" }, 1002), /No pending ask from "review"/);
 });
 
 test("reply with explicit to must match even when only one pending ask exists", () => {

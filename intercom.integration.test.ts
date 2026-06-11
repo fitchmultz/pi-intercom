@@ -461,6 +461,14 @@ test("intercom tool accepts displayed short IDs when session names are duplicate
     const [, message] = await messagePromise;
     assert.equal(message.content.text, "short id delivery works");
 
+    const tooShortPrefixResult = await intercomTool.execute("tool-too-short", {
+      action: "send",
+      to: shortTarget.slice(0, 7),
+      message: "too short should not deliver",
+    }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(tooShortPrefixResult.isError, true);
+    assert.match(tooShortPrefixResult.content[0]?.text ?? "", /Session not found/);
+
     const listResult = await intercomTool.execute("tool-list", {
       action: "list",
     }, new AbortController().signal, undefined, harness.ctx);
@@ -638,6 +646,7 @@ test("compose overlay preserves pasted multiline handoffs and can send ask-mode 
   );
   splitMarkerOverlay.handleInput("\x1b");
   splitMarkerOverlay.handleInput("[");
+  splitMarkerOverlay.invalidate();
   splitMarkerOverlay.handleInput("200~\tSplit");
   splitMarkerOverlay.handleInput("\x1b");
   splitMarkerOverlay.handleInput("[");

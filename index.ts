@@ -10,6 +10,7 @@ import { InlineMessageComponent } from "./ui/inline-message.ts";
 import { loadConfig, type IntercomConfig } from "./config.ts";
 import type { SessionInfo, Message, Attachment } from "./types.ts";
 import { ReplyTracker } from "./reply-tracker.ts";
+import { formatSessionTarget, formatTargetOptions, targetDisplayName, resolveSessionTarget as resolveSessionTargetValue } from "./session-targets.ts";
 
 const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
 const SUBAGENT_RESULT_INTERCOM_EVENT = "subagent:result-intercom";
@@ -354,9 +355,6 @@ function duplicateSessionNames(sessions: SessionInfo[]): Set<string> {
       .filter((name, index, names) => names.indexOf(name) !== index)
   );
 }
-function shortSessionId(sessionId: string): string {
-  return sessionId.slice(0, 8);
-}
 function parseSubagentIntercomPayload(payload: unknown): { to: string; message: string; requestId?: string } | null {
   if (typeof payload !== "object" || payload === null) {
     return null;
@@ -380,38 +378,6 @@ function buildPresenceIdentity(pi: ExtensionAPI, sessionId: string): { name: str
   return {
     name: resolveIntercomPresenceName(pi.getSessionName(), sessionId),
   };
-}
-function formatSessionLabel(session: SessionInfo, duplicates: Set<string>, allSessions: SessionInfo[] = [session]): string {
-  if (!session.name) {
-    return session.id;
-  }
-  const lowerName = session.name.toLowerCase();
-  const nameConflictsWithOtherIdPrefix = allSessions.some((candidate) =>
-    candidate.id !== session.id && candidate.id.toLowerCase().startsWith(lowerName)
-  );
-  return duplicates.has(lowerName) || nameConflictsWithOtherIdPrefix
-    ? `${session.name} (${formatSessionTarget(session, allSessions)})`
-    : session.name;
-}
-function formatSessionTarget(session: SessionInfo, allSessions: SessionInfo[] = [session]): string {
-  const normalizedIds = allSessions.map((candidate) => candidate.id.toLowerCase());
-  const normalizedNames = new Set(allSessions
-    .map((candidate) => candidate.name?.toLowerCase())
-    .filter((name): name is string => Boolean(name)));
-  const id = session.id.toLowerCase();
-  for (let length = 8; length < session.id.length; length += 1) {
-    const prefix = id.slice(0, length);
-    const uniqueIdPrefix = normalizedIds.filter((candidateId) => candidateId.startsWith(prefix)).length === 1;
-    if (uniqueIdPrefix && !normalizedNames.has(prefix)) {
-      return session.id.slice(0, length);
-    }
-  }
-  return session.id;
-}
-function formatDuplicateTargetOptions(sessions: SessionInfo[], allSessions: SessionInfo[] = sessions): string {
-  return sessions
-    .map((session) => `${session.name || session.id.slice(0, 8)} → ${formatSessionTarget(session, allSessions)}`)
-    .join(", ");
 }
 function formatSessionListRow(session: SessionInfo, currentCwd: string, isSelf: boolean, duplicates = new Set<string>(), allSessions: SessionInfo[] = [session]): string {
   const name = session.name || "Unnamed session";
@@ -813,29 +779,14 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     return nextReconnectPromise;
   }
   async function resolveSessionTarget(activeClient: IntercomClient, nameOrId: string): Promise<string | null> {
-    const target = nameOrId.trim();
     const sessions = await activeClient.listSessions();
-    const byId = sessions.find(s => s.id === target);
-    if (byId) {
-      return byId.id;
+    const resolution = resolveSessionTargetValue(sessions, nameOrId);
+    if (resolution.status === "found") {
+      return resolution.target!.id;
     }
-
-    const lowerName = target.toLowerCase();
-    const byName = sessions.filter(s => s.name?.toLowerCase() === lowerName);
-    const lowerTarget = target.toLowerCase();
-    const byShortId = sessions.filter(s => s.id.toLowerCase().startsWith(lowerTarget));
-    const candidatesById = new Map<string, SessionInfo>();
-    for (const session of [...byName, ...byShortId]) {
-      candidatesById.set(session.id, session);
+    if (resolution.status === "ambiguous") {
+      throw new Error(`Target "${nameOrId}" matches multiple sessions. Use one of these targets: ${formatTargetOptions(resolution.matches, sessions)}.`);
     }
-
-    if (candidatesById.size === 1) {
-      return Array.from(candidatesById.values())[0]!.id;
-    }
-    if (candidatesById.size > 1) {
-      throw new Error(`Target "${nameOrId}" matches multiple sessions. Use one of these targets: ${formatDuplicateTargetOptions(Array.from(candidatesById.values()), sessions)}.`);
-    }
-
     return null;
   }
   function deliverLocalSubagentRelayMessage(sender: "subagent-control" | "subagent-result", status: string, messageText: string): void {
@@ -1760,7 +1711,6 @@ Usage:
 
     let currentSession: SessionInfo;
     let sessions: SessionInfo[];
-    let duplicates: Set<string>;
     try {
       const mySessionId = overlayClient.sessionId;
       const allSessions = await overlayClient.listSessions();
@@ -1771,7 +1721,6 @@ Usage:
         return;
       }
       currentSession = foundCurrentSession;
-      duplicates = duplicateSessionNames(allSessions);
       sessions = allSessions.filter(s => s.id !== mySessionId);
     } catch (error) {
       notifyIfLive(ctx, `Failed to list sessions: ${getErrorMessage(error)}`, "error", overlayGeneration);
@@ -1793,7 +1742,7 @@ Usage:
     }
     if (!getLiveContext(ctx, overlayGeneration)) return;
 
-    const targetLabel = formatSessionLabel(selectedSession, duplicates, [...sessions, currentSession]);
+    const targetLabel = targetDisplayName(selectedSession, [...sessions, currentSession]);
 
     const result = await ctx.ui.custom<ComposeResult>(
       (tui, theme, keybindings, done) => new ComposeOverlay(tui, theme, keybindings, selectedSession, targetLabel, overlayClient, done),

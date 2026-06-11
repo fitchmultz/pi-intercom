@@ -1565,7 +1565,7 @@ test("async subagent result intercom events wake the current orchestrator sessio
   assert.deepEqual(deliveryAcks, [{ requestId: "result-1", delivered: true }]);
 });
 
-test("foreground subagent result intercom events are passive follow-ups for the current orchestrator session", async () => {
+test("foreground subagent result intercom events are acknowledged without messaging the current orchestrator session", async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const events = new EventEmitter();
   const sentMessages: Array<{ message: { customType?: string; content?: string }; options?: { triggerTurn?: boolean; deliverAs?: string } }> = [];
@@ -1600,11 +1600,7 @@ test("foreground subagent result intercom events are passive follow-ups for the 
   });
   await new Promise((resolve) => setImmediate(resolve));
 
-  assert.equal(sentMessages.length, 1);
-  assert.equal(sentMessages[0]?.message.customType, "intercom_message");
-  assert.match(sentMessages[0]?.message.content ?? "", /From subagent-result/);
-  assert.match(sentMessages[0]?.message.content ?? "", /Mode: chain/);
-  assert.deepEqual(sentMessages[0]?.options, { deliverAs: "followUp" });
+  assert.deepEqual(sentMessages, []);
   assert.deepEqual(deliveryAcks, [{ requestId: "result-foreground", delivered: true }]);
 });
 

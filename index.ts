@@ -837,7 +837,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     return null;
   }
-  function deliverLocalSubagentRelayMessage(sender: "subagent-control" | "subagent-result", status: string, messageText: string, delivery: InboundDelivery = "trigger"): void {
+  function deliverLocalSubagentRelayMessage(sender: "subagent-control" | "subagent-result", status: string, messageText: string): void {
     const now = Date.now();
     sendIncomingMessage({
       from: {
@@ -856,7 +856,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         content: { text: messageText },
       },
       bodyText: messageText,
-    }, delivery);
+    }, "trigger");
   }
   function recordSubagentDeliveryError(entryType: string, to: string, message: string, error: unknown): void {
     pi.appendEntry(entryType, {
@@ -890,8 +890,11 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         return;
       }
       if (currentSessionTargetMatches(parsed.to)) {
-        const delivery = options.sender === "subagent-result" && parsed.source === "foreground" ? "followUp" : "trigger";
-        deliverLocalSubagentRelayMessage(options.sender, options.status, parsed.message, delivery);
+        if (options.sender === "subagent-result" && parsed.source === "foreground") {
+          if (options.acknowledge) emitResultDelivery(parsed.requestId, true);
+          return;
+        }
+        deliverLocalSubagentRelayMessage(options.sender, options.status, parsed.message);
         if (options.acknowledge) emitResultDelivery(parsed.requestId, true);
         return;
       }
@@ -912,8 +915,11 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         return;
       }
       if (currentSessionTargetMatches(parsed.to, target, activeClient)) {
-        const delivery = options.sender === "subagent-result" && parsed.source === "foreground" ? "followUp" : "trigger";
-        deliverLocalSubagentRelayMessage(options.sender, options.status, parsed.message, delivery);
+        if (options.sender === "subagent-result" && parsed.source === "foreground") {
+          if (options.acknowledge) emitResultDelivery(parsed.requestId, true);
+          return;
+        }
+        deliverLocalSubagentRelayMessage(options.sender, options.status, parsed.message);
         if (options.acknowledge) emitResultDelivery(parsed.requestId, true);
         return;
       }

@@ -1522,10 +1522,10 @@ test("subagent control intercom events wake the current orchestrator session", a
   assert.equal(sentMessages[0]?.options?.triggerTurn, true);
 });
 
-test("subagent result intercom events wake the current orchestrator session", async () => {
+test("async subagent result intercom events wake the current orchestrator session", async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const events = new EventEmitter();
-  const sentMessages: Array<{ message: { customType?: string; content?: string }; options?: { triggerTurn?: boolean } }> = [];
+  const sentMessages: Array<{ message: { customType?: string; content?: string }; options?: { triggerTurn?: boolean; deliverAs?: string } }> = [];
   const deliveryAcks: unknown[] = [];
   events.on("subagent:result-intercom-delivery", (payload) => deliveryAcks.push(payload));
   const pi = {
@@ -1542,7 +1542,7 @@ test("subagent result intercom events wake the current orchestrator session", as
     registerTool: () => undefined,
     registerCommand: () => undefined,
     registerShortcut: () => undefined,
-    sendMessage: (message: { customType?: string; content?: string }, options?: { triggerTurn?: boolean }) => {
+    sendMessage: (message: { customType?: string; content?: string }, options?: { triggerTurn?: boolean; deliverAs?: string }) => {
       sentMessages.push({ message, options });
     },
     appendEntry: () => undefined,
@@ -1552,6 +1552,7 @@ test("subagent result intercom events wake the current orchestrator session", as
   pi.events.emit("subagent:result-intercom", {
     to: "orchestrator",
     requestId: "result-1",
+    source: "async",
     message: "subagent result\n\nRun: 78f659a3\nAgent: worker\nStatus: completed",
   });
   await new Promise((resolve) => setImmediate(resolve));
@@ -1562,6 +1563,49 @@ test("subagent result intercom events wake the current orchestrator session", as
   assert.match(sentMessages[0]?.message.content ?? "", /Status: completed/);
   assert.equal(sentMessages[0]?.options?.triggerTurn, true);
   assert.deepEqual(deliveryAcks, [{ requestId: "result-1", delivered: true }]);
+});
+
+test("foreground subagent result intercom events are passive follow-ups for the current orchestrator session", async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const events = new EventEmitter();
+  const sentMessages: Array<{ message: { customType?: string; content?: string }; options?: { triggerTurn?: boolean; deliverAs?: string } }> = [];
+  const deliveryAcks: unknown[] = [];
+  events.on("subagent:result-intercom-delivery", (payload) => deliveryAcks.push(payload));
+  const pi = {
+    getSessionName: () => "orchestrator",
+    events: {
+      on: (channel: string, handler: (payload: unknown) => void) => {
+        events.on(channel, handler);
+        return () => events.off(channel, handler);
+      },
+      emit: (channel: string, payload: unknown) => events.emit(channel, payload),
+    },
+    on: () => undefined,
+    registerMessageRenderer: () => undefined,
+    registerTool: () => undefined,
+    registerCommand: () => undefined,
+    registerShortcut: () => undefined,
+    sendMessage: (message: { customType?: string; content?: string }, options?: { triggerTurn?: boolean; deliverAs?: string }) => {
+      sentMessages.push({ message, options });
+    },
+    appendEntry: () => undefined,
+  };
+
+  piIntercomExtension(pi as never);
+  pi.events.emit("subagent:result-intercom", {
+    to: "orchestrator",
+    requestId: "result-foreground",
+    source: "foreground",
+    message: "subagent result\n\nRun: c0cefc68\nMode: chain\nStatus: completed",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(sentMessages.length, 1);
+  assert.equal(sentMessages[0]?.message.customType, "intercom_message");
+  assert.match(sentMessages[0]?.message.content ?? "", /From subagent-result/);
+  assert.match(sentMessages[0]?.message.content ?? "", /Mode: chain/);
+  assert.deepEqual(sentMessages[0]?.options, { deliverAs: "followUp" });
+  assert.deepEqual(deliveryAcks, [{ requestId: "result-foreground", delivered: true }]);
 });
 
 test("async ask can be replied to later from the single pending ask fallback", { concurrency: false }, async () => {

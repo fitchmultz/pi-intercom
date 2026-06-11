@@ -379,7 +379,7 @@ function duplicateSessionNames(sessions: SessionInfo[]): Set<string> {
       .filter((name, index, names) => names.indexOf(name) !== index)
   );
 }
-function parseSubagentIntercomPayload(payload: unknown): { to: string; message: string; requestId?: string } | null {
+function parseSubagentIntercomPayload(payload: unknown): { to: string; message: string; requestId?: string; source?: "foreground" | "async" } | null {
   if (typeof payload !== "object" || payload === null) {
     return null;
   }
@@ -388,7 +388,8 @@ function parseSubagentIntercomPayload(payload: unknown): { to: string; message: 
     return null;
   }
   const requestId = typeof record.requestId === "string" ? record.requestId : undefined;
-  return { to: record.to, message: record.message, ...(requestId ? { requestId } : {}) };
+  const source = record.source === "foreground" || record.source === "async" ? record.source : undefined;
+  return { to: record.to, message: record.message, ...(requestId ? { requestId } : {}), ...(source ? { source } : {}) };
 }
 function resolveIntercomPresenceName(sessionName: string | undefined, sessionId: string): string {
   const trimmedName = sessionName?.trim();
@@ -836,7 +837,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     return null;
   }
-  function deliverLocalSubagentRelayMessage(sender: "subagent-control" | "subagent-result", status: string, messageText: string): void {
+  function deliverLocalSubagentRelayMessage(sender: "subagent-control" | "subagent-result", status: string, messageText: string, delivery: InboundDelivery = "trigger"): void {
     const now = Date.now();
     sendIncomingMessage({
       from: {
@@ -855,7 +856,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         content: { text: messageText },
       },
       bodyText: messageText,
-    }, "trigger");
+    }, delivery);
   }
   function recordSubagentDeliveryError(entryType: string, to: string, message: string, error: unknown): void {
     pi.appendEntry(entryType, {
@@ -889,7 +890,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         return;
       }
       if (currentSessionTargetMatches(parsed.to)) {
-        deliverLocalSubagentRelayMessage(options.sender, options.status, parsed.message);
+        const delivery = options.sender === "subagent-result" && parsed.source === "foreground" ? "followUp" : "trigger";
+        deliverLocalSubagentRelayMessage(options.sender, options.status, parsed.message, delivery);
         if (options.acknowledge) emitResultDelivery(parsed.requestId, true);
         return;
       }
@@ -910,7 +912,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         return;
       }
       if (currentSessionTargetMatches(parsed.to, target, activeClient)) {
-        deliverLocalSubagentRelayMessage(options.sender, options.status, parsed.message);
+        const delivery = options.sender === "subagent-result" && parsed.source === "foreground" ? "followUp" : "trigger";
+        deliverLocalSubagentRelayMessage(options.sender, options.status, parsed.message, delivery);
         if (options.acknowledge) emitResultDelivery(parsed.requestId, true);
         return;
       }

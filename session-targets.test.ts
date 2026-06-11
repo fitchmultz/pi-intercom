@@ -17,8 +17,11 @@ test("targetDisplayName adds a safe target when a name collides with another id 
   assert.equal(targetDisplayName(sessions[2]!, sessions), "abcdefgh (xyz00000)");
 });
 
-test("resolveSessionTarget rejects too-short id prefixes", () => {
-  assert.equal(resolveSessionTarget(sessions, "abcdefg").status, "none");
+test("resolveSessionTarget rejects too-short id prefixes with a specific status", () => {
+  const resolution = resolveSessionTarget(sessions, "abcdefg");
+  assert.equal(resolution.status, "prefix_too_short");
+  assert.equal(resolution.minLength, 8);
+  assert.deepEqual(resolution.matches.map((session) => session.id).sort(), [sessions[0]!.id, sessions[1]!.id].sort());
 });
 
 test("resolveSessionTarget resolves safe prefixes and reports name-prefix ambiguity", () => {
@@ -26,4 +29,21 @@ test("resolveSessionTarget resolves safe prefixes and reports name-prefix ambigu
   const ambiguous = resolveSessionTarget(sessions, "abcdefgh");
   assert.equal(ambiguous.status, "ambiguous");
   assert.deepEqual(ambiguous.matches.map((session) => session.id).sort(), [sessions[0]!.id, sessions[2]!.id].sort());
+});
+
+test("resolveSessionTarget accepts an exact short name that only overlaps its own id", () => {
+  const selfOverlap = [{ id: "abcdefghi-1111-2222-3333-444444444444", name: "abc" }];
+  const resolution = resolveSessionTarget(selfOverlap, "abc");
+  assert.equal(resolution.status, "found");
+  assert.equal(resolution.target, selfOverlap[0]);
+});
+
+test("resolveSessionTarget rejects exact names that are unsafe too-short id prefixes", () => {
+  const unsafe = [
+    { id: "abcdefghi-1111-2222-3333-444444444444", name: "worker" },
+    { id: "xyz00000-1111-2222-3333-444444444444", name: "abcdefg" },
+  ];
+  const ambiguous = resolveSessionTarget(unsafe, "abcdefg");
+  assert.equal(ambiguous.status, "ambiguous");
+  assert.deepEqual(ambiguous.matches.map((session) => session.id).sort(), [unsafe[0]!.id, unsafe[1]!.id].sort());
 });

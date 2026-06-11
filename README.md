@@ -24,7 +24,7 @@ Pi-intercom also integrates well with [pi-subagents](https://github.com/nicobail
 
 ## In One Minute
 
-Each pi session that has `pi-intercom` loaded and enabled connects to a tiny local broker over a local IPC transport. The broker keeps track of connected sessions and routes direct messages to the one you target by name or session ID. The extension gives you both a tool (`intercom`) and a small overlay UI (`/intercom` or `Alt+M`). Incoming messages are rendered inline inside the recipient session, can trigger a turn immediately, and are also stored in Pi session history as extension entries.
+Each pi session that has `pi-intercom` loaded and enabled connects to a tiny local broker over a local IPC transport. The broker keeps track of connected sessions and routes direct messages to the one you target by name or session ID. The extension gives you both a tool (`intercom`) and a small overlay UI (`/intercom` or `Alt+M`). Incoming messages are rendered inline inside the recipient session and stored in Pi session history as extension entries. Messages sent with `ask` wake the recipient model; fire-and-forget `send` is passive by default.
 
 ## Install
 
@@ -81,9 +81,9 @@ intercom({ action: "list" })
 // → **Other sessions:**
 // → • research (6332faab) — ~/projects/api (claude-sonnet-4) [same cwd, thinking]
 
-// Send a fire-and-forget message
-intercom({ action: "send", to: "research", message: "Check if UserService.validate() handles null" })
-// → Message sent to research (fire-and-forget; use `ask` when you need a reply)
+// Ask a peer to start work and reply inline
+intercom({ action: "ask", to: "research", message: "Check if UserService.validate() handles null. Reply with what you find." })
+// → Reply from research: UserService.validate() handles null via the guard at line 42.
 
 // Check connection status
 intercom({ action: "status" })
@@ -116,7 +116,7 @@ Found the issue — UserService.validate() doesn't check for null input.
 See auth.ts:142-156.
 ```
 
-The reply hint (enabled by default) points to `intercom({ action: "reply", ... })`, so recipients do not need raw sender or `replyTo` IDs. Idle recipients get a new turn immediately; busy interactive recipients receive the message once they go idle. Attachment content is included in the agent-visible body, and messages are rendered inline and stored in Pi session history.
+The reply hint (enabled by default) points to `intercom({ action: "reply", ... })`, so recipients do not need raw sender or `replyTo` IDs. Idle recipients get a new turn immediately for `ask`; busy interactive recipients receive asks once they go idle. Fire-and-forget sends render passively without waking the recipient model. Attachment content is included in the agent-visible body, and messages are rendered inline and stored in Pi session history.
 
 ## Workflow: Planner-Worker Coordination
 
@@ -140,15 +140,16 @@ intercom({ action: "list" })
 
 ### The Conversation
 
-Here's how a typical exchange looks. The planner delegates with `send` (fire-and-forget). The worker uses `ask` for anything that needs a response — questions, discoveries, completion reports. `ask` sends the message and blocks until the planner replies, so the worker gets the answer as a tool result and continues in the same turn.
+Here's how a typical exchange looks. The planner delegates with `ask` when it wants to wake an idle worker and receive an acknowledgement. The worker also uses `ask` for anything that needs a response — questions, discoveries, completion reports. `ask` sends the message and blocks until the recipient replies, so the sender gets the answer as a tool result and continues in the same turn.
 
-**Planner sends a task:**
+**Planner delegates a task and wakes the worker:**
 ```typescript
 intercom({
-  action: "send",
+  action: "ask",
   to: "worker",
-  message: "Task-3: Add retry logic to API client. Key files: src/api/client.ts, src/api/types.ts. Ask if anything's unclear."
+  message: "Task-3: Add retry logic to API client. Key files: src/api/client.ts, src/api/types.ts. Reply with ACK, then ask if anything's unclear."
 })
+// → Reply from worker: ACK — starting task-3.
 ```
 
 **Worker hits an ambiguity — asks and waits:**
@@ -186,7 +187,7 @@ intercom({
 
 | Pattern | Action | Why |
 |---------|--------|-----|
-| **Task Delegation** | Planner uses `send` | Fire-and-forget. Planner doesn't need to wait for an ack. |
+| **Task Delegation** | Planner uses `ask` | Wakes the worker and confirms it received the task. |
 | **Clarification Request** | Worker uses `ask` | Worker needs the answer to proceed. Blocks until reply. |
 | **Discovery Escalation** | Worker uses `ask` | Worker needs approval before changing course. |
 | **Completion Report** | Worker uses `ask` | Planner might have follow-up instructions or the next task. |
@@ -207,13 +208,13 @@ This matters because the agent receiving the message doesn't need to reconstruct
 
 ### `send` vs `ask`
 
-`send` is fire-and-forget — the tool returns immediately after delivery and does not return any later response. Use `ask` for acknowledgements, decisions, or anything where the sender needs the answer in the same workflow. By default, `send` sends immediately even in interactive sessions. If you want an approval dialog before non-reply sends, set `confirmSend: true` in config. Replies that include `replyTo` still skip confirmation so reply-hint flows can continue without an extra approval step.
+`send` is fire-and-forget — the tool returns immediately after delivery and does not return any later response. It renders in the recipient session without waking the recipient model, so use it for notifications, progress, and context drops. Use `ask` for acknowledgements, decisions, or anything where the sender needs the answer in the same workflow. If you want an approval dialog before non-reply sends, set `confirmSend: true` in config. Replies that include `replyTo` still skip confirmation so reply-hint flows can continue without an extra approval step.
 
 `ask` sends the message and blocks until the recipient responds (10-minute timeout). The reply comes back as the tool result, so the agent continues in the same turn with full context. No confirmation dialog — if you're asking and waiting, the intent is clear.
 
 `reply` is receiver-side sugar for replying to an inbound ask. In the turn triggered by an incoming intercom ask, `intercom({ action: "reply", message: "..." })` targets that exact sender and message automatically. If you reply later, it falls back to the single unresolved inbound ask. If multiple asks are pending, use `intercom({ action: "pending" })` to inspect them and then call `reply` with `to` to disambiguate.
 
-The planner typically uses `send`. If you prefer manual approval for outgoing non-reply messages, turn on `confirmSend: true`. The worker uses `ask` for everything (no confirmation needed, gets answers inline), so it can operate autonomously either way.
+The planner typically uses `ask` to wake a worker with a new task, and `send` only for passive context drops or progress notes that do not need the recipient model to run. If you prefer manual approval for outgoing non-reply messages, turn on `confirmSend: true`. The worker uses `ask` for anything requiring a decision or acknowledgement, so it can operate autonomously either way.
 
 ## Workflow: Subagent-to-Supervisor Escalation
 
@@ -228,7 +229,7 @@ This workflow requires [`pi-subagents`](https://github.com/nicobailon/pi-subagen
 - `PI_SUBAGENT_CHILD_AGENT` — the agent type
 - `PI_SUBAGENT_CHILD_INDEX` — the child index within the run
 
-If any are missing, the session falls back to the regular `intercom` tool.
+If any are missing, the session falls back to the regular `intercom` tool. A subagent status line may mention an intercom target before the child is actually registered with pi-intercom; treat `intercom({ action: "list" })` as the source of truth. If the advertised target is absent from `list`, use `contact_supervisor` from the child side or normal subagent controls instead of sending to that target.
 
 ### Three Reasons
 
@@ -339,7 +340,7 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 
 **`list`** — Returns the current session plus other active intercom-connected sessions with name, safe target, working directory, model, and live status. Status is derived automatically from Pi lifecycle events: `idle`, `thinking`, or `tool:<name>`. If multiple sessions have the same name, use the displayed target exactly as shown, for example `to: "ca7bfec2"`. The target may be longer than eight characters when needed to avoid collisions.
 
-**`send`** — Sends a fire-and-forget message to the specified session. By default it sends immediately, including in interactive sessions. Set `confirmSend: true` in config if you want a confirmation dialog for non-reply sends. Replies that include `replyTo` skip confirmation. Returns delivery confirmation, not a later response.
+**`send`** — Sends a fire-and-forget message to the specified session. It renders passively and does not wake the recipient model. Set `confirmSend: true` in config if you want a confirmation dialog for non-reply sends. Replies that include `replyTo` skip confirmation. Returns delivery confirmation, not a later response.
 
 **`ask`** — Sends a message and waits for the recipient to reply (10-minute timeout). The reply is returned as the tool result. No confirmation dialog. Only one pending `ask` is allowed per session at a time. Use this when the agent needs the answer to continue working.
 

@@ -6,9 +6,10 @@ export interface TargetIdentity {
 export const MIN_SESSION_TARGET_PREFIX_LENGTH = 8;
 
 export interface TargetResolution<T extends TargetIdentity> {
-  status: "none" | "found" | "ambiguous";
+  status: "none" | "found" | "ambiguous" | "prefix_too_short";
   target?: T;
   matches: T[];
+  minLength?: number;
 }
 
 export function shortSessionId(sessionId: string): string {
@@ -74,9 +75,22 @@ export function resolveSessionTarget<T extends TargetIdentity>(sessions: T[], ra
   }
 
   const nameMatches = sessions.filter((session) => session.name?.trim().toLowerCase() === lowerTarget);
-  const prefixMatches = target.length >= MIN_SESSION_TARGET_PREFIX_LENGTH
-    ? sessions.filter((session) => session.id.toLowerCase().startsWith(lowerTarget))
-    : [];
+  const allPrefixMatches = sessions.filter((session) => session.id.toLowerCase().startsWith(lowerTarget));
+  const prefixMatches = target.length >= MIN_SESSION_TARGET_PREFIX_LENGTH ? allPrefixMatches : [];
+  if (target.length > 0 && target.length < MIN_SESSION_TARGET_PREFIX_LENGTH && allPrefixMatches.length > 0) {
+    if (nameMatches.length > 0) {
+      const matchesById = new Map<string, T>();
+      for (const session of [...nameMatches, ...allPrefixMatches]) {
+        matchesById.set(session.id, session);
+      }
+      const matches = Array.from(matchesById.values());
+      if (matches.length === 1) {
+        return { status: "found", target: matches[0], matches };
+      }
+      return { status: "ambiguous", matches };
+    }
+    return { status: "prefix_too_short", matches: allPrefixMatches, minLength: MIN_SESSION_TARGET_PREFIX_LENGTH };
+  }
 
   const matchesById = new Map<string, T>();
   for (const session of [...nameMatches, ...prefixMatches]) {

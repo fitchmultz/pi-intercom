@@ -18,6 +18,8 @@ const SUBAGENT_RESULT_INTERCOM_DELIVERY_EVENT = "subagent:result-intercom-delive
 const INBOUND_FLUSH_DELAY_MS = 200;
 const INBOUND_IDLE_RETRY_MS = 500;
 const DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX = "subagent-chat";
+const RECIPIENT_TURN_FAILED_PREFIX = "Recipient turn failed:";
+const RECIPIENT_TURN_FAILED_ATTACHMENT = "pi-intercom-recipient-turn-failure";
 const SUBAGENT_ORCHESTRATOR_TARGET_ENV = "PI_SUBAGENT_ORCHESTRATOR_TARGET";
 const SUBAGENT_RUN_ID_ENV = "PI_SUBAGENT_RUN_ID";
 const SUBAGENT_CHILD_AGENT_ENV = "PI_SUBAGENT_CHILD_AGENT";
@@ -38,6 +40,8 @@ interface InboundMessageEntry {
   replyCommand?: string;
   bodyText: string;
 }
+
+type InboundDelivery = "trigger" | "followUp" | "passive";
 
 type ContactSupervisorReason = "need_decision" | "progress_update" | "interview_request";
 
@@ -64,6 +68,23 @@ function getErrorMessage(error: unknown): string {
 
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
+}
+
+function getAssistantErrorMessage(message: unknown): string | null {
+  if (typeof message !== "object" || message === null) {
+    return null;
+  }
+  const record = message as Record<string, unknown>;
+  if (record.role !== "assistant") {
+    return null;
+  }
+  const errorMessage = typeof record.errorMessage === "string" && record.errorMessage.trim()
+    ? record.errorMessage.trim()
+    : undefined;
+  if (record.stopReason === "error") {
+    return errorMessage ?? "assistant turn failed";
+  }
+  return null;
 }
 
 function formatAttachments(attachments: Attachment[]): string {
@@ -375,8 +396,9 @@ function resolveIntercomPresenceName(sessionName: string | undefined, sessionId:
   return `${DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX}-${normalizedSessionId.slice(0, 8)}`;
 }
 function buildPresenceIdentity(pi: ExtensionAPI, sessionId: string): { name: string } {
+  const subagentIntercomSessionName = process.env[SUBAGENT_INTERCOM_SESSION_NAME_ENV]?.trim();
   return {
-    name: resolveIntercomPresenceName(pi.getSessionName(), sessionId),
+    name: subagentIntercomSessionName || resolveIntercomPresenceName(pi.getSessionName(), sessionId),
   };
 }
 function formatSessionListRow(session: SessionInfo, currentCwd: string, isSelf: boolean, duplicates = new Set<string>(), allSessions: SessionInfo[] = [session]): string {
@@ -569,11 +591,11 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     return Boolean(resolvedTo && activeClient?.sessionId && resolvedTo === activeClient.sessionId)
       || targets.has(to.trim().toLowerCase());
   }
-  function sendIncomingMessage(entry: InboundMessageEntry, delivery: "trigger" | "followUp", generation = runtimeGeneration): void {
+  function sendIncomingMessage(entry: InboundMessageEntry, delivery: InboundDelivery, generation = runtimeGeneration): void {
     if (runtimeStarted && !getLiveContext(runtimeContext, generation)) {
       return;
     }
-    if (delivery !== "followUp") {
+    if (delivery === "trigger") {
       replyTracker.queueTurnContext({ from: entry.from, message: entry.message, receivedAt: Date.now() });
     }
     const senderDisplay = entry.from.name || entry.from.id.slice(0, 8);
@@ -623,8 +645,9 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
 
     const entries = pendingIdleMessages.splice(0, pendingIdleMessages.length);
+    const triggerIndex = entries.findIndex((entry) => entry.message.expectsReply);
     entries.forEach((entry, index) => {
-      sendIncomingMessage(entry, index === 0 ? "trigger" : "followUp");
+      sendIncomingMessage(entry, index === triggerIndex ? "trigger" : "passive");
     });
   }
   function queueIdleMessage(entry: InboundMessageEntry): void {
@@ -683,7 +706,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         return;
       }
       if (getLiveContext(liveContext, messageGeneration)) {
-        sendIncomingMessage(entry, "trigger", messageGeneration);
+        sendIncomingMessage(entry, message.expectsReply ? "trigger" : "passive", messageGeneration);
       }
     })();
   }
@@ -786,6 +809,9 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     if (resolution.status === "ambiguous") {
       throw new Error(`Target "${nameOrId}" matches multiple sessions. Use one of these targets: ${formatTargetOptions(resolution.matches, sessions)}.`);
+    }
+    if (resolution.status === "prefix_too_short") {
+      throw new Error(`Target "${nameOrId}" is too short. Use the displayed target from intercom list, such as ${formatTargetOptions(resolution.matches, sessions)}.`);
     }
     return null;
   }
@@ -960,6 +986,30 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     replyTracker.endTurn();
     scheduleInboundFlush(0);
   });
+  pi.on("message_end", (event) => {
+    const activeClient = client;
+    const context = replyTracker.currentTurn();
+    const errorMessage = getAssistantErrorMessage((event as { message?: unknown }).message);
+    if (!activeClient?.isConnected() || !context?.message.expectsReply || !errorMessage) {
+      return;
+    }
+    const replyTo = context.message.id;
+    void activeClient.send(context.from.id, {
+      text: `${RECIPIENT_TURN_FAILED_PREFIX} ${errorMessage}`,
+      replyTo,
+      attachments: [{
+        type: "context",
+        name: RECIPIENT_TURN_FAILED_ATTACHMENT,
+        content: errorMessage,
+      }],
+    }).then((result) => {
+      if (result.delivered) {
+        replyTracker.markReplied(replyTo);
+      }
+    }).catch(() => {
+      // Best-effort failure propagation; the local error remains visible in the recipient session.
+    });
+  });
   pi.on("agent_start", () => {
     if (!getLiveContext()) {
       return;
@@ -988,6 +1038,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     agentRunning = false;
     activeTools.clear();
+    replyTracker.endAgent();
     syncPresenceStatus();
     scheduleInboundFlush(0);
   });
@@ -1535,6 +1586,14 @@ Usage:
               messageId: replyMessage.id,
               timestamp: replyMessage.timestamp,
             });
+            const recipientTurnFailure = replyMessage.content.attachments?.some((attachment) => attachment.name === RECIPIENT_TURN_FAILED_ATTACHMENT);
+            if (recipientTurnFailure) {
+              return {
+                content: [{ type: "text", text: replyText }],
+                isError: true,
+                details: { error: true, recipientTurnFailed: true },
+              };
+            }
             return {
               content: [{ type: "text", text: `**Reply from ${to}:**\n${replyText}${replyAttachments}` }],
               isError: false,

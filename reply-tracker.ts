@@ -10,11 +10,21 @@ export interface IntercomContext {
 function resolveBySenderTarget(contexts: IntercomContext[], to: string): IntercomContext[] {
   const sessions = contexts.map((context) => context.from);
   const resolution = resolveSessionTarget(sessions, to);
-  if (resolution.status === "none") {
+  if (resolution.status === "none" || resolution.status === "prefix_too_short") {
     return [];
   }
   const matchingIds = new Set(resolution.matches.map((session) => session.id));
   return contexts.filter((context) => matchingIds.has(context.from.id));
+}
+
+function tooShortSenderTargetMessage(contexts: IntercomContext[], to: string): string | null {
+  const resolution = resolveSessionTarget(contexts.map((context) => context.from), to);
+  if (resolution.status !== "prefix_too_short") {
+    return null;
+  }
+  const matchingIds = new Set(resolution.matches.map((session) => session.id));
+  const matches = contexts.filter((context) => matchingIds.has(context.from.id));
+  return `Pending ask target "${to}" is too short. Use one of these targets or pass replyTo: ${pendingSenderOptions(matches, contexts)}.`;
 }
 
 function pendingSenderOptions(contexts: IntercomContext[], allContexts: IntercomContext[] = contexts): string {
@@ -28,6 +38,7 @@ export class ReplyTracker {
   private readonly pendingAsks = new Map<string, IntercomContext>();
   private readonly pendingTurnContexts: IntercomContext[] = [];
   private currentTurnContext: IntercomContext | null = null;
+  private activeAgentContext: IntercomContext | null = null;
 
   constructor(private readonly askTimeoutMs = 10 * 60 * 1000) {}
 
@@ -46,16 +57,29 @@ export class ReplyTracker {
   beginTurn(now = Date.now()): void {
     this.pruneExpired(now);
     this.currentTurnContext = this.pendingTurnContexts.shift() ?? null;
+    if (this.currentTurnContext) {
+      this.activeAgentContext = this.currentTurnContext;
+    }
+  }
+
+  currentTurn(): IntercomContext | null {
+    return this.currentTurnContext ?? this.activeAgentContext;
   }
 
   endTurn(): void {
     this.currentTurnContext = null;
   }
 
+  endAgent(): void {
+    this.currentTurnContext = null;
+    this.activeAgentContext = null;
+  }
+
   reset(): void {
     this.pendingAsks.clear();
     this.pendingTurnContexts.length = 0;
     this.currentTurnContext = null;
+    this.activeAgentContext = null;
   }
 
   resolveReplyTarget(options: { to?: string; replyTo?: string }, now = Date.now()): IntercomContext {
@@ -72,6 +96,10 @@ export class ReplyTracker {
         throw new Error(`No pending ask with replyTo "${options.replyTo}"`);
       }
       if (options.to) {
+        const tooShortMessage = tooShortSenderTargetMessage(contexts, options.to);
+        if (tooShortMessage) {
+          throw new Error(tooShortMessage);
+        }
         const senderMatches = resolveBySenderTarget(contexts, options.to);
         if (!senderMatches.some((context) => context.message.id === target.message.id)) {
           throw new Error(`Pending ask "${options.replyTo}" is not from "${options.to}"`);
@@ -81,6 +109,10 @@ export class ReplyTracker {
     }
 
     if (options.to) {
+      const tooShortMessage = tooShortSenderTargetMessage(contexts, options.to);
+      if (tooShortMessage) {
+        throw new Error(tooShortMessage);
+      }
       const matches = resolveBySenderTarget(contexts, options.to);
       if (matches.length === 1) {
         return matches[0]!;
@@ -110,6 +142,9 @@ export class ReplyTracker {
     this.pendingAsks.delete(replyTo);
     if (this.currentTurnContext?.message.id === replyTo) {
       this.currentTurnContext = null;
+    }
+    if (this.activeAgentContext?.message.id === replyTo) {
+      this.activeAgentContext = null;
     }
   }
 

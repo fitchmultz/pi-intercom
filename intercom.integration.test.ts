@@ -402,11 +402,249 @@ test("incoming reply hints are shown for asks but not fire-and-forget sends", { 
     await new Promise((resolve) => setImmediate(resolve));
     assert.match(harness.sentMessages[0]?.message.content ?? "", /FYI only/);
     assert.doesNotMatch(harness.sentMessages[0]?.message.content ?? "", /To reply/);
+    assert.deepEqual(harness.sentMessages[0]?.options, { deliverAs: "followUp" });
 
     await planner.send(target.id, { messageId: "needs-reply", text: "Need answer", expectsReply: true });
     await new Promise((resolve) => setImmediate(resolve));
     assert.match(harness.sentMessages[1]?.message.content ?? "", /Need answer/);
     assert.match(harness.sentMessages[1]?.message.content ?? "", /To reply/);
+    assert.deepEqual(harness.sentMessages[1]?.options, { triggerTurn: true });
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("recipient turn failures are reported to waiting ask senders", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("failing-worker", { hasUI: true });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const target = await waitForSessionByName(planner, "failing-worker");
+    const replyPromise = waitForReply(planner, "failure-ask");
+
+    await planner.send(target.id, { messageId: "failure-ask", text: "Need answer", expectsReply: true });
+    await new Promise((resolve) => setImmediate(resolve));
+    await harness.emitLifecycle("turn_start");
+    await harness.emitLifecycle("message_end", {
+      message: { role: "assistant", stopReason: "error", errorMessage: "No API key for provider: test" },
+    });
+
+    const reply = await replyPromise;
+    assert.equal(reply.message.replyTo, "failure-ask");
+    assert.match(reply.message.content.text, /Recipient turn failed: No API key for provider: test/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("recipient turn failures after tool turns still report to waiting ask senders", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("multi-turn-failing-worker", { hasUI: true });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const target = await waitForSessionByName(planner, "multi-turn-failing-worker");
+    const replyPromise = waitForReply(planner, "multi-turn-failure-ask");
+
+    await planner.send(target.id, { messageId: "multi-turn-failure-ask", text: "Need answer", expectsReply: true });
+    await new Promise((resolve) => setImmediate(resolve));
+    await harness.emitLifecycle("turn_start");
+    await harness.emitLifecycle("turn_end");
+    await harness.emitLifecycle("turn_start");
+    await harness.emitLifecycle("message_end", {
+      message: { role: "assistant", stopReason: "error", errorMessage: "Tool-followup provider failure" },
+    });
+
+    const reply = await replyPromise;
+    assert.equal(reply.message.replyTo, "multi-turn-failure-ask");
+    assert.match(reply.message.content.text, /Recipient turn failed: Tool-followup provider failure/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("recipient turn failures do not report after an ask is already replied", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("replied-worker", { hasUI: true });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const target = await waitForSessionByName(planner, "replied-worker");
+    const firstReplyPromise = waitForReply(planner, "already-replied-ask");
+
+    await planner.send(target.id, { messageId: "already-replied-ask", text: "Need answer", expectsReply: true });
+    await new Promise((resolve) => setImmediate(resolve));
+    await harness.emitLifecycle("turn_start");
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const replyResult = await intercomTool.execute("reply-before-error", {
+      action: "reply",
+      message: "normal reply",
+    }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(replyResult.isError, false);
+    assert.equal((await firstReplyPromise).message.content.text, "normal reply");
+
+    let unexpectedFailureReply = false;
+    const handler = (_from: SessionInfo, message: Message) => {
+      if (message.replyTo === "already-replied-ask") unexpectedFailureReply = true;
+    };
+    planner.on("message", handler);
+    await harness.emitLifecycle("message_end", {
+      message: { role: "assistant", stopReason: "error", errorMessage: "later failure" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    planner.off("message", handler);
+    assert.equal(unexpectedFailureReply, false);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("recipient turn failure propagation stops after agent_end", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("agent-ended-worker", { hasUI: true });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const target = await waitForSessionByName(planner, "agent-ended-worker");
+    await planner.send(target.id, { messageId: "agent-ended-ask", text: "Need answer", expectsReply: true });
+    await new Promise((resolve) => setImmediate(resolve));
+    await harness.emitLifecycle("turn_start");
+    await harness.emitLifecycle("turn_end");
+    await harness.emitLifecycle("agent_end");
+
+    let unexpectedFailureReply = false;
+    const handler = (_from: SessionInfo, message: Message) => {
+      if (message.replyTo === "agent-ended-ask") unexpectedFailureReply = true;
+    };
+    planner.on("message", handler);
+    await harness.emitLifecycle("message_end", {
+      message: { role: "assistant", stopReason: "error", errorMessage: "post-agent failure" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    planner.off("message", handler);
+    assert.equal(unexpectedFailureReply, false);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("intercom ask returns an error result for recipient turn failure replies", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { cleanup } = await setupClients();
+  const worker = new IntercomClient();
+  const harness = createExtensionHarness("ask-controller", { hasUI: true });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    await worker.connect({
+      name: "failing-peer",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    });
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const askReceived = once(worker, "message") as Promise<[SessionInfo, Message]>;
+    const resultPromise = intercomTool.execute("ask-failure", {
+      action: "ask",
+      to: "failing-peer",
+      message: "Can you answer?",
+    }, new AbortController().signal, undefined, harness.ctx);
+    const [from, message] = await askReceived;
+    await worker.send(from.id, {
+      text: "Recipient turn failed: No API key for provider: test",
+      replyTo: message.id,
+      attachments: [{ type: "context", name: "pi-intercom-recipient-turn-failure", content: "No API key for provider: test" }],
+    });
+
+    const result = await resultPromise;
+    assert.equal(result.isError, true);
+    assert.match(result.content[0]?.text ?? "", /Recipient turn failed: No API key for provider: test/);
+    assert.deepEqual(result.details, { error: true, recipientTurnFailed: true });
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await worker.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("intercom ask treats failure-like normal reply text as a successful reply", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { cleanup } = await setupClients();
+  const worker = new IntercomClient();
+  const harness = createExtensionHarness("ask-controller-normal-prefix", { hasUI: true });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    await worker.connect({
+      name: "prefix-reply-peer",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    });
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const askReceived = once(worker, "message") as Promise<[SessionInfo, Message]>;
+    const resultPromise = intercomTool.execute("ask-normal-prefix", {
+      action: "ask",
+      to: "prefix-reply-peer",
+      message: "Can you answer?",
+    }, new AbortController().signal, undefined, harness.ctx);
+    const [from, message] = await askReceived;
+    await worker.send(from.id, { text: "Recipient turn failed: is just text in this normal answer", replyTo: message.id });
+
+    const result = await resultPromise;
+    assert.equal(result.isError, false);
+    assert.match(result.content[0]?.text ?? "", /Recipient turn failed: is just text/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await worker.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("non-error assistant messages do not propagate recipient failure replies", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("non-error-worker", { hasUI: true });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const target = await waitForSessionByName(planner, "non-error-worker");
+    await planner.send(target.id, { messageId: "non-error-ask", text: "Need answer", expectsReply: true });
+    await new Promise((resolve) => setImmediate(resolve));
+    await harness.emitLifecycle("turn_start");
+
+    let unexpectedFailureReply = false;
+    const handler = (_from: SessionInfo, message: Message) => {
+      if (message.replyTo === "non-error-ask") unexpectedFailureReply = true;
+    };
+    planner.on("message", handler);
+    await harness.emitLifecycle("message_end", {
+      message: { role: "assistant", stopReason: "stop", errorMessage: "stale provider warning" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    planner.off("message", handler);
+    assert.equal(unexpectedFailureReply, false);
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await cleanup();
@@ -467,7 +705,8 @@ test("intercom tool accepts displayed short IDs when session names are duplicate
       message: "too short should not deliver",
     }, new AbortController().signal, undefined, harness.ctx);
     assert.equal(tooShortPrefixResult.isError, true);
-    assert.match(tooShortPrefixResult.content[0]?.text ?? "", /Session not found/);
+    assert.match(tooShortPrefixResult.content[0]?.text ?? "", /too short/);
+    assert.match(tooShortPrefixResult.content[0]?.text ?? "", new RegExp(shortTarget));
 
     const listResult = await intercomTool.execute("tool-list", {
       action: "list",
@@ -925,6 +1164,29 @@ test("supervisor tool registers only when child metadata is present", async () =
     assert.match(JSON.stringify(supervisorTool?.parameters), /interview_request/);
     assert.match(JSON.stringify(supervisorTool?.parameters), /questions/);
   });
+});
+
+test("subagent intercom session name env controls registered presence target", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+
+  try {
+    await withChildOrchestratorEnv({
+      sessionName: "subagent-worker-78f659a3-1",
+    }, async () => {
+      const harness = createExtensionHarness("fallback-visible-name");
+      piIntercomExtension(harness.pi as never);
+      assert.deepEqual(harness.tools.map((tool) => tool.name), ["intercom"]);
+      await harness.emitLifecycle("session_start");
+
+      const registered = await waitForSessionByName(planner, "subagent-worker-78f659a3-1");
+      assert.equal(registered.name, "subagent-worker-78f659a3-1");
+      assert.equal((await planner.listSessions()).some((session) => session.name === "fallback-visible-name"), false);
+      await harness.emitLifecycle("session_shutdown");
+    });
+  } finally {
+    await cleanup();
+  }
 });
 
 test("child supervisor tool resolves target and includes run metadata", { concurrency: false }, async () => {

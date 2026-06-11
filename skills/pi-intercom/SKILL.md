@@ -36,13 +36,14 @@ The most common pattern. One session holds the big picture, others do hands-on w
 /name worker     # Terminal 2
 ```
 
-**Planner delegates a task** (fire-and-forget):
+**Planner delegates a task and wakes the worker**:
 ```typescript
 intercom({
-  action: "send",
+  action: "ask",
   to: "worker",
-  message: "Task-3: Add retry logic to API client. Key files: src/api/client.ts. Ask if anything's unclear."
+  message: "Task-3: Add retry logic to API client. Key files: src/api/client.ts. Reply with ACK, then ask if anything's unclear."
 })
+// → Reply from worker: ACK — starting task-3.
 ```
 
 **Worker asks for clarification** (blocks until answer):
@@ -93,13 +94,13 @@ intercom({ action: "reply", to: "planner", message: "Use exponential backoff sta
 
 ### Pattern 4: Broadcast to Multiple Workers
 
-Send to multiple sessions in parallel:
+Send passive context to multiple sessions in parallel. This does not wake idle worker models; use `ask` one worker at a time when you need acknowledgement or execution to start immediately:
 
 ```typescript
 const workers = ["worker-1", "worker-2", "worker-3"];
 const task = "Check for null pointer exceptions in your assigned files";
 
-// Fire-and-forget to all workers
+// Passive fire-and-forget to all workers
 workers.forEach(w => 
   intercom({ action: "send", to: w, message: task })
 );
@@ -190,14 +191,17 @@ intercom({ action: "reply", to: "subagent-worker-78f659a3-1", message: "Use the 
 **Important:** Only sessions where `pi-subagents` supplied child bridge metadata
 get the `contact_supervisor` tool. Normal sessions use the regular `intercom`
 tool. If you see the formatted supervisor decision/progress update message, treat
-it as a `contact_supervisor` escalation.
+it as a `contact_supervisor` escalation. Do not assume a subagent status line's
+advertised intercom target is usable unless that target appears in
+`intercom({ action: "list" })`; if it is absent, use `contact_supervisor` from the
+child side or normal subagent controls instead of sending to the advertised name.
 
 ## Key Differences
 
 | Action | Behavior | Use When |
 |--------|----------|----------|
-| `send` | Fire-and-forget | You don't need a response |
-| `ask` | Blocks until reply (10 min timeout) | You need an answer to continue |
+| `send` | Fire-and-forget; renders passively without waking the recipient model | You don't need a response |
+| `ask` | Wakes recipient and blocks until reply (10 min timeout) | You need an answer to continue |
 | `reply` | Responds to the active or pending inbound ask | You were asked something and need to answer naturally |
 | `pending` | Lists unresolved inbound asks | You need to see who is waiting before replying |
 | `list` | Returns all sessions with live status | You need to discover targets or choose an idle peer |
@@ -268,9 +272,9 @@ The same-codebase examples above load this local fork with `--extension ./index.
 
 ```typescript
 intercom({
-  action: "send",
+  action: "ask",
   to: "worker",
-  message: "Take task X. Ask if blocked."
+  message: "Take task X. Reply with ACK, then ask if blocked."
 })
 
 intercom({
@@ -332,6 +336,7 @@ if (result.isError && result.content[0].text.includes("Already waiting")) {
 ### `send` Behavior
 
 - **No timeout**: Message is delivered or fails immediately
+- **Passive delivery**: Plain sends render in the recipient session without triggering a model turn
 - **Confirmation dialogs**: If `confirmSend: true` in config, interactive sessions show a confirmation dialog
 - **Replies skip confirmation**: Messages with `replyTo` never show confirmation dialogs
 
@@ -362,12 +367,12 @@ intercom({
   to: "reviewer",
   message: "PR #123 is ready for review. Key changes in auth.ts."
 });
-// Continue immediately, don't wait
+// Continue immediately, don't wait; the recipient model is not woken by this send
 ```
 
 ### Use `ask` When You Need a Reply Hint
 
-Make it easy for recipients to respond by using `ask` for anything that needs an answer. Plain `send` is fire-and-forget and should not ask the receiver to reply.
+Make it easy for recipients to respond by using `ask` for anything that needs an answer. Plain `send` is fire-and-forget, does not wake the recipient model, and should not ask the receiver to reply.
 
 ```typescript
 // GOOD: Recipient sees the built-in reply hint and the sender gets the answer inline
@@ -421,7 +426,7 @@ if (!result.delivered) {
 ```typescript
 // The ask will reject with a timeout error
 // Design your workflow so answers come within 10 minutes
-// For longer tasks, use send + follow-up ask pattern
+// For longer tasks, start with ask for ACK, then use passive send for checkpoints and ask again only for decisions
 ```
 
 ## Troubleshooting
@@ -504,13 +509,13 @@ intercom({ action: "send", to: "planner", message: "Task-3 complete. All done." 
 ### Long-Running Task with Checkpoints
 
 ```typescript
-// For tasks that might exceed 10 minutes, use send + periodic asks
+// For tasks that might exceed 10 minutes, use ask to start work, then send passive checkpoint updates
 
-// 1. Initial send with full context
+// 1. Initial ask with full context so the worker wakes and acknowledges
 intercom({
-  action: "send",
+  action: "ask",
   to: "worker",
-  message: "Implement user authentication. This will take 30+ minutes. I'll check in at milestones."
+  message: "Implement user authentication. This will take 30+ minutes. Reply with ACK when you start."
 });
 
 // 2. Worker sends progress via send (no timeout)

@@ -51,7 +51,7 @@ test("reply with to resolves matching pending ask", () => {
 
   assert.equal(tracker.resolveReplyTarget({ to: "reviewer" }, 1002).message.id, "ask-2");
   assert.equal(tracker.resolveReplyTarget({ to: "planner-id" }, 1002).message.id, "ask-1");
-  assert.throws(() => tracker.resolveReplyTarget({ to: "review" }, 1002), /No pending ask from "review"/);
+  assert.throws(() => tracker.resolveReplyTarget({ to: "review" }, 1002), /too short.*reviewer \(reviewer-, replyTo: ask-2\)/);
 });
 
 test("reply with explicit to must match even when only one pending ask exists", () => {
@@ -104,6 +104,20 @@ test("reply exact full sender ID wins over prefix matches", () => {
   assert.throws(
     () => tracker.resolveReplyTarget({ to: "abcdefgh", replyTo: "ask-2" }, 1002),
     /is not from "abcdefgh"/,
+  );
+});
+
+test("reply rejects too-short sender ID prefixes with a helpful target hint", () => {
+  const tracker = new ReplyTracker();
+  tracker.recordIncomingMessage(createSession("abcdefgh", "first"), createMessage("ask-1", "First"), 1000);
+
+  assert.throws(
+    () => tracker.resolveReplyTarget({ to: "abcdefg" }, 1002),
+    /too short.*first \(abcdefgh, replyTo: ask-1\)/,
+  );
+  assert.throws(
+    () => tracker.resolveReplyTarget({ to: "abcdefg", replyTo: "ask-1" }, 1002),
+    /too short.*first \(abcdefgh, replyTo: ask-1\)/,
   );
 });
 

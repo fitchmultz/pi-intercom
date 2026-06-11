@@ -29,10 +29,10 @@ Each pi session that has `pi-intercom` loaded and enabled connects to a tiny loc
 ## Install
 
 ```bash
-pi install npm:pi-intercom
+pi install . --local
 ```
 
-Then restart Pi. The extension auto-connects to the broker on startup and registers the bundled `pi-intercom` skill for common coordination patterns.
+Run that from this local fork checkout, then restart Pi in the project. The extension auto-connects to the broker on startup and registers the bundled `pi-intercom` skill for common coordination patterns.
 
 **Recommended:** Add this snippet to your project's `AGENTS.md` to help agents understand when to coordinate across sessions:
 
@@ -105,7 +105,7 @@ intercom({
 
 ### Receiving Messages
 
-When a message arrives, it appears inline in your chat with the sender's info and a reply hint:
+When a message arrives, it appears inline in your chat with the sender's info. Messages sent with `ask` include a reply hint:
 
 ```
 **From research** (~/projects/api)
@@ -193,7 +193,7 @@ intercom({
 
 ### Reply Hints
 
-When `replyHint` is enabled (the default), incoming messages include the exact `intercom()` call to respond:
+When `replyHint` is enabled (the default), incoming asks include the exact `intercom()` call to respond:
 
 ```
 **From planner** (~/projects/api)
@@ -380,7 +380,7 @@ Create `~/.pi/agent/intercom/config.json`:
 | `brokerArgs` | `["--no-install", "tsx"]` | Arguments passed to `brokerCommand` before the broker script path |
 | `confirmSend` | false | Show a confirmation dialog before non-reply sends from an interactive session with UI |
 | `enabled` | true | Enable/disable intercom entirely |
-| `replyHint` | true | Include reply instruction in incoming messages |
+| `replyHint` | true | Include reply instructions in incoming asks |
 | `status` | — | Optional custom status suffix shown after the automatic lifecycle status, for example `thinking · researching` |
 
 For example, if you have Bun installed and want it to start the broker directly, use:
@@ -438,7 +438,7 @@ Runtime files live at `~/.pi/agent/intercom/`:
 
 **Auto-spawn with file lock.** The broker starts on first connection and exits after 5 seconds idle. There is no daemon to manage. A spawn lock file, keyed by PID and timestamp, prevents duplicate brokers when multiple sessions start at once.
 
-**`ask` stays client-side.** The broker still routes plain messages; it does not have a special request/response mode for `ask`. The client waits for a matching reply before it triggers a new turn, then returns that reply as the tool result. Reply hints make that flow practical by showing the recipient the exact `send` call to use. Separately, `list` / `sessions` now carry a `requestId` so a delayed session-list reply cannot be mistaken for a newer one.
+**`ask` stays client-side.** The broker still routes plain messages; it does not have a special request/response mode for `ask`. The client waits for a matching reply before it triggers a new turn, then returns that reply as the tool result. Reply hints make that flow practical by showing the recipient the exact `reply` call to use. Separately, `list` / `sessions` now carry a `requestId` so a delayed session-list reply cannot be mistaken for a newer one.
 
 ## pi-intercom vs pi-messenger
 

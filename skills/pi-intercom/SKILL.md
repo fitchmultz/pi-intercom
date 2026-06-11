@@ -107,7 +107,7 @@ workers.forEach(w =>
 
 ### Pattern 5: Send with Attachments
 
-Share code snippets, files, or context:
+Share code snippets, files, or context. Use `ask` instead of `send` if the sender needs an acknowledgement or answer:
 
 ```typescript
 intercom({
@@ -225,7 +225,7 @@ Same codebase:
 ```bash
 cmux new-split right
 sleep 0.5
-cmux send --surface right 'cd /path/to/current/repo && pi --name worker\n'
+cmux send --surface right 'cd /path/to/current/repo && pi --name worker --extension ./index.ts --skill ./skills\n'
 ```
 
 Reference codebase:
@@ -233,7 +233,7 @@ Reference codebase:
 ```bash
 cmux new-split right
 sleep 0.5
-cmux send --surface right 'cd /path/to/reference/repo && pi --name reference-scout\n'
+cmux send --surface right 'cd /path/to/reference/repo && pi --name reference-scout --extension /path/to/pi-intercom-fork/index.ts --skill /path/to/pi-intercom-fork/skills\n'
 ```
 
 ### Optional Fallback: tmux Worker or Scout Session
@@ -245,7 +245,7 @@ SOCKET_DIR=${TMPDIR:-/tmp}/pi-tmux-sockets
 mkdir -p "$SOCKET_DIR"
 SOCKET="$SOCKET_DIR/pi.sock"
 SESSION=pi-worker
-tmux -S "$SOCKET" new -d -s "$SESSION" -c "/path/to/current/repo" 'pi --name worker'
+tmux -S "$SOCKET" new -d -s "$SESSION" -c "/path/to/current/repo" 'pi --name worker --extension ./index.ts --skill ./skills'
 ```
 
 Reference codebase:
@@ -255,7 +255,7 @@ SOCKET_DIR=${TMPDIR:-/tmp}/pi-tmux-sockets
 mkdir -p "$SOCKET_DIR"
 SOCKET="$SOCKET_DIR/pi.sock"
 SESSION=pi-reference-auth
-tmux -S "$SOCKET" new -d -s "$SESSION" -c "/path/to/reference/repo" 'pi --name reference-auth'
+tmux -S "$SOCKET" new -d -s "$SESSION" -c "/path/to/reference/repo" 'pi --name reference-auth --extension /path/to/pi-intercom-fork/index.ts --skill /path/to/pi-intercom-fork/skills'
 ```
 
 When you use `tmux`, tell the user how to watch it:
@@ -264,7 +264,7 @@ When you use `tmux`, tell the user how to watch it:
 tmux -S "$SOCKET" attach -t "$SESSION"
 ```
 
-The examples above start Pi with `--name` so the peer is targetable immediately. Then coordinate from the current session:
+The same-codebase examples above load this local fork with `--extension ./index.ts --skill ./skills`; the reference-codebase examples use `/path/to/pi-intercom-fork` as a placeholder for this checkout. All examples start Pi with `--name` so the peer is intercom-connected and targetable immediately. If pi-intercom is already installed globally or project-locally, the extra `--extension` / `--skill` flags are optional. Then coordinate from the current session:
 
 ```typescript
 intercom({
@@ -282,11 +282,12 @@ intercom({
 
 ### Smoke Test a Spawned Peer
 
-After starting a named peer, verify delivery before delegating real work:
+After starting a named peer, verify delivery before delegating real work. Use the name you started, such as `worker`, `reference-scout`, or `reference-auth`:
 
 ```typescript
 intercom({ action: "list" })
 intercom({ action: "ask", to: "worker", message: "Smoke test: reply exactly OK" })
+// For reference peers, use to: "reference-scout" or to: "reference-auth" instead.
 ```
 
 Expected result:
@@ -364,18 +365,16 @@ intercom({
 // Continue immediately, don't wait
 ```
 
-### Include reply hints in messages
+### Use `ask` When You Need a Reply Hint
 
-Make it easy for recipients to respond:
+Make it easy for recipients to respond by using `ask` for anything that needs an answer. Plain `send` is fire-and-forget and should not ask the receiver to reply.
 
 ```typescript
-// GOOD: Recipient sees exact command to reply
+// GOOD: Recipient sees the built-in reply hint and the sender gets the answer inline
 intercom({
-  action: "send",
+  action: "ask",
   to: "worker",
-  message: `Found the issue in auth.ts:142. Use getUserById() instead of getUser().
-
-Reply with: intercom({ action: "reply", message: "..." })`
+  message: "Found the issue in auth.ts:142. Should I use getUserById() instead of getUser()?"
 });
 ```
 
@@ -497,8 +496,8 @@ intercom({
 // Worker sends periodic updates
 intercom({ action: "send", to: "planner", message: "Task-1 complete (15min). Starting Task-2." });
 // ... work ...
-intercom({ action: "send", to: "planner", message: "Task-2 complete (30min). Task-3 blocked - need API key." });
-// ... get unblocked ...
+intercom({ action: "ask", to: "planner", message: "Task-2 complete (30min). Task-3 blocked - need API key. Please provide the key or next step." });
+// ... continue after the reply unblocks the task ...
 intercom({ action: "send", to: "planner", message: "Task-3 complete. All done." });
 ```
 

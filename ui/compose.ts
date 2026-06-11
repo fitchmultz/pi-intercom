@@ -21,6 +21,9 @@ export class ComposeOverlay implements Component {
   private done: (result: ComposeResult) => void;
   private inputBuffer: string = "";
   private mode: "send" | "ask" = "send";
+  private inBracketedPaste: boolean = false;
+  private pendingEscape: string | null = null;
+  private pendingEscapeTimer: NodeJS.Timeout | null = null;
   private sending: boolean = false;
   private error: string | null = null;
 
@@ -46,12 +49,59 @@ export class ComposeOverlay implements Component {
 
   handleInput(data: string): void {
     if (this.sending) return;
+    const bracketedPasteMarkers = ["\x1b[200~", "\x1b[201~"];
+    const holdPendingEscape = (value: string, cancelAsEscape: boolean) => {
+      this.pendingEscape = value;
+      this.pendingEscapeTimer = setTimeout(() => {
+        if (cancelAsEscape && this.pendingEscape === "\x1b") {
+          this.done({ sent: false });
+        }
+        this.pendingEscape = null;
+      }, 25);
+    };
+
+    if (this.pendingEscape) {
+      if (this.pendingEscapeTimer) {
+        clearTimeout(this.pendingEscapeTimer);
+        this.pendingEscapeTimer = null;
+      }
+      data = this.pendingEscape + data;
+      this.pendingEscape = null;
+    } else if (data === "\x1b") {
+      holdPendingEscape(data, true);
+      return;
+    }
+
+    const isPartialBracketedPasteMarker = bracketedPasteMarkers.some((marker) => marker.startsWith(data))
+      && !bracketedPasteMarkers.some((marker) => data.includes(marker));
+    if (isPartialBracketedPasteMarker) {
+      holdPendingEscape(data, false);
+      return;
+    }
+
     if (this.keybindings.matches(data, "tui.select.cancel")) {
       this.done({ sent: false });
       return;
     }
 
-    if (data === "\t") {
+    const startsBracketedPaste = data.includes("\x1b[200~");
+    const endsBracketedPaste = data.includes("\x1b[201~");
+    const wasBracketedPaste = this.inBracketedPaste || startsBracketedPaste || endsBracketedPaste;
+    if (startsBracketedPaste) this.inBracketedPaste = true;
+    data = data.replace(/\x1b\[200~|\x1b\[201~/g, "");
+    if (endsBracketedPaste) this.inBracketedPaste = false;
+
+    const trailingPartialMarker = bracketedPasteMarkers
+      .flatMap((marker) => Array.from({ length: marker.length - 1 }, (_, index) => marker.slice(0, index + 1)))
+      .sort((a, b) => b.length - a.length)
+      .find((prefix) => data.endsWith(prefix));
+    if (trailingPartialMarker) {
+      data = data.slice(0, -trailingPartialMarker.length);
+      holdPendingEscape(trailingPartialMarker, false);
+    }
+    if (!data) return;
+
+    if (!wasBracketedPaste && data === "\t") {
       this.mode = this.mode === "send" ? "ask" : "send";
       this.tui.requestRender();
       return;
@@ -62,7 +112,7 @@ export class ComposeOverlay implements Component {
     }
 
     if (this.keybindings.matches(data, "tui.select.confirm")) {
-      if (this.inputBuffer.trim()) {
+      if (this.inputBuffer.length > 0) {
         this.sendMessage();
       }
       return;

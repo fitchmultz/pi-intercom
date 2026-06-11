@@ -29,16 +29,28 @@ function middleTruncate(text: string, maxWidth: number): string {
   return truncateToWidth(`${left}…${right}`, maxWidth, "");
 }
 
-function shortSessionId(sessionId: string): string {
-  return sessionId.slice(0, 8);
+function sessionTarget(session: SessionInfo, allSessions: SessionInfo[]): string {
+  const normalizedIds = allSessions.map((candidate) => candidate.id.toLowerCase());
+  const normalizedNames = new Set(allSessions
+    .map((candidate) => candidate.name?.toLowerCase())
+    .filter((name): name is string => Boolean(name)));
+  const id = session.id.toLowerCase();
+  for (let length = 8; length < session.id.length; length += 1) {
+    const prefix = id.slice(0, length);
+    const uniqueIdPrefix = normalizedIds.filter((candidateId) => candidateId.startsWith(prefix)).length === 1;
+    if (uniqueIdPrefix && !normalizedNames.has(prefix)) {
+      return session.id.slice(0, length);
+    }
+  }
+  return session.id;
 }
 
-function sessionTitle(session: SessionInfo, options?: { self?: boolean; sameCwd?: boolean }): string {
+function sessionTitle(session: SessionInfo, allSessions: SessionInfo[], options?: { self?: boolean; sameCwd?: boolean }): string {
   const name = session.name || "Unnamed session";
   const tags = [options?.self ? "self" : undefined, options?.sameCwd ? "same cwd" : undefined]
     .filter((tag): tag is string => Boolean(tag));
   const suffix = tags.length ? ` [${tags.join(", ")}]` : "";
-  return `${name} (${shortSessionId(session.id)})${suffix}`;
+  return `${name} (${sessionTarget(session, allSessions)})${suffix}`;
 }
 
 export class SessionListOverlay implements Component {
@@ -49,6 +61,7 @@ export class SessionListOverlay implements Component {
   private sessions: SessionInfo[];
   private selectedIndex = 0;
   private maxVisible = 8;
+  private allSessions: SessionInfo[];
 
   constructor(
     theme: Theme,
@@ -61,6 +74,7 @@ export class SessionListOverlay implements Component {
     this.keybindings = keybindings;
     this.currentSession = currentSession;
     this.sessions = sessions;
+    this.allSessions = [currentSession, ...sessions];
     this.done = done;
   }
 
@@ -103,7 +117,9 @@ export class SessionListOverlay implements Component {
   render(width: number): string[] {
     const innerWidth = Math.max(36, Math.min(width - 2, 88));
     const contentWidth = Math.max(1, innerWidth - 2);
-    const footer = `${this.keybindings.getKeys("tui.select.confirm").join("/")}: Message • ${this.keybindings.getKeys("tui.select.cancel").join("/")}: Close`;
+    const footer = this.sessions.length === 0
+      ? `${this.keybindings.getKeys("tui.select.cancel").join("/")}: Close`
+      : `${this.keybindings.getKeys("tui.select.confirm").join("/")}: Message • ${this.keybindings.getKeys("tui.select.cancel").join("/")}: Close`;
     const border = (text: string) => this.theme.fg("accent", text);
     const row = (text = "") => {
       const clipped = truncateToWidth(text, contentWidth, "", true);
@@ -115,7 +131,7 @@ export class SessionListOverlay implements Component {
     lines.push(row(this.theme.bold(" Current Session")));
     lines.push(border(`├${"─".repeat(contentWidth)}┤`));
     lines.push(row());
-    lines.push(row(`  ${this.theme.fg("dim", sessionTitle(this.currentSession, { self: true }))}`));
+    lines.push(row(`  ${this.theme.fg("dim", sessionTitle(this.currentSession, this.allSessions, { self: true }))}`));
     lines.push(row(`  ${this.theme.fg("dim", `${middleTruncate(this.currentSession.cwd, Math.max(8, contentWidth - 4))} • ${this.currentSession.model}`)}`));
     lines.push(row());
     lines.push(border(`├${"─".repeat(contentWidth)}┤`));
@@ -124,6 +140,8 @@ export class SessionListOverlay implements Component {
 
     if (this.sessions.length === 0) {
       lines.push(row(this.theme.fg("dim", " No other intercom-connected sessions")));
+      lines.push(row(this.theme.fg("dim", " Start: pi --name worker --extension ./index.ts --skill ./skills")));
+      lines.push(row(this.theme.fg("dim", " Then run intercom({ action: \"list\" }) again")));
     } else {
       const startIndex = Math.max(
         0,
@@ -136,7 +154,7 @@ export class SessionListOverlay implements Component {
         const isSelected = index === this.selectedIndex;
         const sameCwd = session.cwd === this.currentSession.cwd;
         const prefix = isSelected ? this.theme.fg("accent", "→ ") : "  ";
-        const title = sessionTitle(session, { sameCwd });
+        const title = sessionTitle(session, this.allSessions, { sameCwd });
         const pathText = `${middleTruncate(session.cwd, Math.max(8, contentWidth - 4))} • ${session.model}`;
 
         lines.push(row(`${prefix}${isSelected ? this.theme.fg("accent", title) : title}`));

@@ -17,7 +17,7 @@ const childEnvKeys = [
   "PI_SUBAGENT_CHILD_INDEX",
   "PI_SUBAGENT_INTERCOM_SESSION_NAME",
 ] as const;
-const sharedHomeDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-home-"));
+const sharedHomeDir = mkdtempSync(path.join(tmpdir(), "pic-"));
 const previousHome = process.env.HOME;
 const previousUserProfile = process.env.USERPROFILE;
 process.env.HOME = sharedHomeDir;
@@ -186,15 +186,25 @@ function createExtensionHarness(sessionName = "child-worker", options: {
   };
 }
 
-async function setupClients() {
-  const broker = spawn("npx", ["--no-install", "tsx", path.join(repoDir, "broker", "broker.ts")], {
+async function setupBroker() {
+  const broker = spawn(process.execPath, [path.join(repoDir, "node_modules", "tsx", "dist", "cli.mjs"), path.join(repoDir, "broker", "broker.ts")], {
     cwd: repoDir,
     env: { ...process.env, HOME: sharedHomeDir, USERPROFILE: sharedHomeDir },
     stdio: ["ignore", "pipe", "pipe"],
   });
+  await waitForBrokerReady(broker);
+  return broker;
+}
+
+async function stopBroker(broker: ChildProcessWithoutNullStreams): Promise<void> {
+  broker.kill("SIGTERM");
+  await once(broker, "exit").catch(() => undefined);
+}
+
+async function setupClients() {
+  const broker = await setupBroker();
 
   try {
-    await waitForBrokerReady(broker);
     const planner = new IntercomClient();
     const orchestrator = new IntercomClient();
 
@@ -221,13 +231,11 @@ async function setupClients() {
       cleanup: async () => {
         await planner.disconnect().catch(() => undefined);
         await orchestrator.disconnect().catch(() => undefined);
-        broker.kill("SIGTERM");
-        await once(broker, "exit").catch(() => undefined);
+        await stopBroker(broker);
       },
     };
   } catch (error) {
-    broker.kill("SIGTERM");
-    await once(broker, "exit").catch(() => undefined);
+    await stopBroker(broker);
     throw error;
   }
 }
@@ -355,6 +363,56 @@ test("contact supervisor tool renders reason and reply state", async () => {
   });
 });
 
+test("intercom tool empty list output gives local fork next steps", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const broker = await setupBroker();
+  const harness = createExtensionHarness("solo", { hasUI: true });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+
+    const result = await intercomTool.execute("tool-empty-list", {
+      action: "list",
+    }, new AbortController().signal, undefined, harness.ctx);
+
+    assert.equal(result.isError, false);
+    const text = result.content[0]?.text ?? "";
+    assert.match(text, /No other sessions connected/);
+    assert.match(text, /pi --name worker/);
+    assert.match(text, /--extension \.\/index\.ts --skill \.\/skills/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await stopBroker(broker);
+  }
+});
+
+test("incoming reply hints are shown for asks but not fire-and-forget sends", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("hint-worker", { hasUI: true });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const target = await waitForSessionByName(planner, "hint-worker");
+
+    await planner.send(target.id, { messageId: "plain-send", text: "FYI only" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.match(harness.sentMessages[0]?.message.content ?? "", /FYI only/);
+    assert.doesNotMatch(harness.sentMessages[0]?.message.content ?? "", /To reply/);
+
+    await planner.send(target.id, { messageId: "needs-reply", text: "Need answer", expectsReply: true });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.match(harness.sentMessages[1]?.message.content ?? "", /Need answer/);
+    assert.match(harness.sentMessages[1]?.message.content ?? "", /To reply/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
 test("intercom tool accepts displayed short IDs when session names are duplicated", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { planner, cleanup } = await setupClients();
@@ -446,6 +504,30 @@ test("intercom tool accepts displayed short IDs when session names are duplicate
     }, new AbortController().signal, undefined, harness.ctx);
     assert.equal(collisionResult.isError, true);
     assert.match(collisionResult.content[0]?.text ?? "", /matches multiple sessions/);
+
+    const duplicateNameAfterCollision = await intercomTool.execute("tool-collision-options", {
+      action: "send",
+      to: "duplicate-worker",
+      message: "ambiguous after collision",
+    }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(duplicateNameAfterCollision.isError, true);
+    assert.match(duplicateNameAfterCollision.content[0]?.text ?? "", new RegExp(target.id.slice(0, 9)));
+
+    const listAfterCollision = await intercomTool.execute("tool-list-after-collision", {
+      action: "list",
+    }, new AbortController().signal, undefined, harness.ctx);
+    assert.match(listAfterCollision.content[0]?.text ?? "", new RegExp(`\\(${target.id.slice(0, 9)}\\)`));
+    assert.match(listAfterCollision.content[0]?.text ?? "", new RegExp(`target:${target.id.slice(0, 9)}`));
+
+    const collisionSafeMessagePromise = once(receiver, "message") as Promise<[SessionInfo, Message]>;
+    const collisionSafeResult = await intercomTool.execute("tool-collision-safe", {
+      action: "send",
+      to: target.id.slice(0, 9),
+      message: "longer short id delivery works",
+    }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(collisionSafeResult.isError, false);
+    const [, collisionSafeMessage] = await collisionSafeMessagePromise;
+    assert.equal(collisionSafeMessage.content.text, "longer short id delivery works");
   } finally {
     await duplicateA.disconnect().catch(() => undefined);
     await duplicateB.disconnect().catch(() => undefined);
@@ -485,7 +567,7 @@ test("compose overlay preserves pasted multiline handoffs and can send ask-mode 
     (result) => { doneResult = result; },
   );
 
-  overlay.handleInput("\tLine 1\n\tLine 2\n");
+  overlay.handleInput("\x1b[200~\tLine 1\n\tLine 2\n\x1b[201~");
   overlay.handleInput("\t");
   const rendered = overlay.render(100).join("\n");
   assert.match(rendered, /Ask to: worker/);
@@ -498,6 +580,91 @@ test("compose overlay preserves pasted multiline handoffs and can send ask-mode 
   assert.equal(renderRequests >= 2, true);
   assert.deepEqual(sent, [{ to: "target-session", text: "\tLine 1\n\tLine 2\n", expectsReply: true }]);
   assert.deepEqual(doneResult, { sent: true, messageId: "message-1", text: "\tLine 1\n\tLine 2\n", expectsReply: true });
+
+  sent.length = 0;
+  doneResult = undefined;
+  const tabOnlyPasteOverlay = new ComposeOverlay(
+    { requestRender: () => { renderRequests += 1; } } as never,
+    theme as never,
+    keybindings as never,
+    { id: "target-session", name: "worker", cwd: repoDir, model: "test-model", pid: 1, startedAt: 0, lastActivity: 0 } as SessionInfo,
+    "worker",
+    { send: async (to: string, options: { text: string; expectsReply?: boolean }) => {
+      sent.push({ to, text: options.text, expectsReply: options.expectsReply });
+      return { id: "message-2", delivered: true };
+    } } as never,
+    (result) => { doneResult = result; },
+  );
+  tabOnlyPasteOverlay.handleInput("\x1b");
+  tabOnlyPasteOverlay.handleInput("[200~");
+  tabOnlyPasteOverlay.handleInput("\t");
+  tabOnlyPasteOverlay.handleInput("Indented");
+  tabOnlyPasteOverlay.handleInput("\x1b");
+  tabOnlyPasteOverlay.handleInput("[201~");
+  tabOnlyPasteOverlay.handleInput("\r");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(sent, [{ to: "target-session", text: "\tIndented", expectsReply: false }]);
+
+  sent.length = 0;
+  const whitespacePasteOverlay = new ComposeOverlay(
+    { requestRender: () => { renderRequests += 1; } } as never,
+    theme as never,
+    keybindings as never,
+    { id: "target-session", name: "worker", cwd: repoDir, model: "test-model", pid: 1, startedAt: 0, lastActivity: 0 } as SessionInfo,
+    "worker",
+    { send: async (to: string, options: { text: string; expectsReply?: boolean }) => {
+      sent.push({ to, text: options.text, expectsReply: options.expectsReply });
+      return { id: "message-3", delivered: true };
+    } } as never,
+    () => undefined,
+  );
+  whitespacePasteOverlay.handleInput("\x1b[200~\t\x1b[201~");
+  whitespacePasteOverlay.handleInput("\r");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(sent, [{ to: "target-session", text: "\t", expectsReply: false }]);
+
+  sent.length = 0;
+  const splitMarkerOverlay = new ComposeOverlay(
+    { requestRender: () => { renderRequests += 1; } } as never,
+    theme as never,
+    keybindings as never,
+    { id: "target-session", name: "worker", cwd: repoDir, model: "test-model", pid: 1, startedAt: 0, lastActivity: 0 } as SessionInfo,
+    "worker",
+    { send: async (to: string, options: { text: string; expectsReply?: boolean }) => {
+      sent.push({ to, text: options.text, expectsReply: options.expectsReply });
+      return { id: "message-4", delivered: true };
+    } } as never,
+    () => undefined,
+  );
+  splitMarkerOverlay.handleInput("\x1b");
+  splitMarkerOverlay.handleInput("[");
+  splitMarkerOverlay.handleInput("200~\tSplit");
+  splitMarkerOverlay.handleInput("\x1b");
+  splitMarkerOverlay.handleInput("[");
+  splitMarkerOverlay.handleInput("201~");
+  splitMarkerOverlay.handleInput("\r");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(sent, [{ to: "target-session", text: "\tSplit", expectsReply: false }]);
+
+  sent.length = 0;
+  const trailingEscOverlay = new ComposeOverlay(
+    { requestRender: () => { renderRequests += 1; } } as never,
+    theme as never,
+    keybindings as never,
+    { id: "target-session", name: "worker", cwd: repoDir, model: "test-model", pid: 1, startedAt: 0, lastActivity: 0 } as SessionInfo,
+    "worker",
+    { send: async (to: string, options: { text: string; expectsReply?: boolean }) => {
+      sent.push({ to, text: options.text, expectsReply: options.expectsReply });
+      return { id: "message-5", delivered: true };
+    } } as never,
+    () => undefined,
+  );
+  trailingEscOverlay.handleInput("\x1b[200~abc\x1b");
+  trailingEscOverlay.handleInput("[");
+  trailingEscOverlay.handleInput("201~");
+  trailingEscOverlay.handleInput("\r");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(sent, [{ to: "target-session", text: "abc", expectsReply: false }]);
 });
 
 test("sessions publish automatic lifecycle status", { concurrency: false }, async () => {
@@ -693,6 +860,18 @@ test("busy non-interactive sessions auto-reply to top-level asks without abortin
     await harness.emitLifecycle("session_start");
 
     const target = await waitForSessionByName(planner, "pipe-worker");
+
+    let unexpectedReply = false;
+    const plainSendHandler = () => { unexpectedReply = true; };
+    planner.on("message", plainSendHandler);
+    const plainSend = await planner.send(target.id, {
+      messageId: "pipe-mode-send",
+      text: "FYI while busy.",
+    });
+    assert.equal(plainSend.delivered, true);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    planner.off("message", plainSendHandler);
+    assert.equal(unexpectedReply, false);
 
     const askId = "pipe-mode-ask";
     const replyPromise = waitForReply(planner, askId, 1000);

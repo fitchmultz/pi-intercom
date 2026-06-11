@@ -75,6 +75,50 @@ test("reply errors when multiple pending asks and no to", () => {
   assert.throws(() => tracker.resolveReplyTarget({}, 1002), /Multiple pending asks — specify `to`/);
 });
 
+test("reply errors for duplicate sender names include copyable targets", () => {
+  const tracker = new ReplyTracker();
+  tracker.recordIncomingMessage(createSession("planner-11111111", "planner"), createMessage("ask-1", "First"), 1000);
+  tracker.recordIncomingMessage(createSession("planner-22222222", "planner"), createMessage("ask-2", "Second"), 1001);
+
+  assert.throws(
+    () => tracker.resolveReplyTarget({ to: "planner" }, 1002),
+    /use one of these targets or pass replyTo: planner \(planner-1, replyTo: ask-1\), planner \(planner-2, replyTo: ask-2\)/,
+  );
+});
+
+test("reply can disambiguate multiple pending asks with replyTo", () => {
+  const tracker = new ReplyTracker();
+  tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "First"), 1000);
+  tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-2", "Second"), 1001);
+
+  assert.equal(tracker.resolveReplyTarget({ to: "planner", replyTo: "ask-2" }, 1002).message.id, "ask-2");
+  assert.throws(() => tracker.resolveReplyTarget({ to: "reviewer", replyTo: "ask-2" }, 1002), /is not from "reviewer"/);
+});
+
+test("reply exact full sender ID wins over prefix matches", () => {
+  const tracker = new ReplyTracker();
+  tracker.recordIncomingMessage(createSession("abcdefgh", "first"), createMessage("ask-1", "First"), 1000);
+  tracker.recordIncomingMessage(createSession("abcdefghi", "second"), createMessage("ask-2", "Second"), 1001);
+
+  assert.equal(tracker.resolveReplyTarget({ to: "abcdefgh" }, 1002).message.id, "ask-1");
+  assert.throws(
+    () => tracker.resolveReplyTarget({ to: "abcdefgh", replyTo: "ask-2" }, 1002),
+    /is not from "abcdefgh"/,
+  );
+});
+
+test("reply duplicate sender options avoid name and prefix collisions", () => {
+  const tracker = new ReplyTracker();
+  tracker.recordIncomingMessage(createSession("abcdefgh1111", "planner"), createMessage("ask-1", "First"), 1000);
+  tracker.recordIncomingMessage(createSession("abcdefgi2222", "planner"), createMessage("ask-2", "Second"), 1001);
+  tracker.recordIncomingMessage(createSession("other-id", "abcdefgh"), createMessage("ask-3", "Third"), 1002);
+
+  assert.throws(
+    () => tracker.resolveReplyTarget({ to: "planner" }, 1003),
+    /planner \(abcdefgh1, replyTo: ask-1\), planner \(abcdefgi, replyTo: ask-2\)/,
+  );
+});
+
 test("reply removes pending ask after successful reply", () => {
   const tracker = new ReplyTracker();
   tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "Need a decision"), 1000);

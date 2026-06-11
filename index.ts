@@ -381,32 +381,49 @@ function buildPresenceIdentity(pi: ExtensionAPI, sessionId: string): { name: str
     name: resolveIntercomPresenceName(pi.getSessionName(), sessionId),
   };
 }
-function formatSessionLabel(session: SessionInfo, duplicates: Set<string>): string {
+function formatSessionLabel(session: SessionInfo, duplicates: Set<string>, allSessions: SessionInfo[] = [session]): string {
   if (!session.name) {
     return session.id;
   }
-  return duplicates.has(session.name.toLowerCase())
-    ? `${session.name} (${shortSessionId(session.id)})`
+  const lowerName = session.name.toLowerCase();
+  const nameConflictsWithOtherIdPrefix = allSessions.some((candidate) =>
+    candidate.id !== session.id && candidate.id.toLowerCase().startsWith(lowerName)
+  );
+  return duplicates.has(lowerName) || nameConflictsWithOtherIdPrefix
+    ? `${session.name} (${formatSessionTarget(session, allSessions)})`
     : session.name;
 }
-function formatSessionTarget(session: SessionInfo): string {
-  return shortSessionId(session.id);
+function formatSessionTarget(session: SessionInfo, allSessions: SessionInfo[] = [session]): string {
+  const normalizedIds = allSessions.map((candidate) => candidate.id.toLowerCase());
+  const normalizedNames = new Set(allSessions
+    .map((candidate) => candidate.name?.toLowerCase())
+    .filter((name): name is string => Boolean(name)));
+  const id = session.id.toLowerCase();
+  for (let length = 8; length < session.id.length; length += 1) {
+    const prefix = id.slice(0, length);
+    const uniqueIdPrefix = normalizedIds.filter((candidateId) => candidateId.startsWith(prefix)).length === 1;
+    if (uniqueIdPrefix && !normalizedNames.has(prefix)) {
+      return session.id.slice(0, length);
+    }
+  }
+  return session.id;
 }
-function formatDuplicateTargetOptions(sessions: SessionInfo[]): string {
+function formatDuplicateTargetOptions(sessions: SessionInfo[], allSessions: SessionInfo[] = sessions): string {
   return sessions
-    .map((session) => `${session.name || session.id.slice(0, 8)} → ${formatSessionTarget(session)}`)
+    .map((session) => `${session.name || session.id.slice(0, 8)} → ${formatSessionTarget(session, allSessions)}`)
     .join(", ");
 }
-function formatSessionListRow(session: SessionInfo, currentCwd: string, isSelf: boolean, duplicates = new Set<string>()): string {
+function formatSessionListRow(session: SessionInfo, currentCwd: string, isSelf: boolean, duplicates = new Set<string>(), allSessions: SessionInfo[] = [session]): string {
   const name = session.name || "Unnamed session";
   const duplicateName = Boolean(session.name && duplicates.has(session.name.toLowerCase()));
   const tags = [
     isSelf ? "self" : session.cwd === currentCwd ? "same cwd" : undefined,
     session.status,
-    duplicateName ? `target:${formatSessionTarget(session)}` : undefined,
+    duplicateName ? `target:${formatSessionTarget(session, allSessions)}` : undefined,
   ].filter((tag): tag is string => Boolean(tag));
+  const target = formatSessionTarget(session, allSessions);
   const suffix = tags.length ? ` [${tags.join(", ")}]` : "";
-  return `• ${name} (${shortSessionId(session.id)}) — ${session.cwd} (${session.model})${suffix}`;
+  return `• ${name} (${target}) — ${session.cwd} (${session.model})${suffix}`;
 }
 function previewText(value: unknown, maxLength = 72): string | undefined {
   if (typeof value !== "string") {
@@ -681,7 +698,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       if (!activeContext.isIdle()) {
         if (!activeContext.hasUI) {
           const activeClient = client;
-          if (!message.replyTo && activeClient?.isConnected()) {
+          if (message.expectsReply && !message.replyTo && activeClient?.isConnected()) {
             try {
               const result = await activeClient.send(from.id, {
                 text: "This agent is running in non-interactive mode and cannot respond to intercom messages while it is working. It will continue its current task and exit when done.",
@@ -816,7 +833,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       return Array.from(candidatesById.values())[0]!.id;
     }
     if (candidatesById.size > 1) {
-      throw new Error(`Target "${nameOrId}" matches multiple sessions. Use one of these targets: ${formatDuplicateTargetOptions(Array.from(candidatesById.values()))}.`);
+      throw new Error(`Target "${nameOrId}" matches multiple sessions. Use one of these targets: ${formatDuplicateTargetOptions(Array.from(candidatesById.values()), sessions)}.`);
     }
 
     return null;
@@ -1397,10 +1414,10 @@ Usage:
             }
 
             const duplicates = duplicateSessionNames(sessions);
-            const currentSection = `**Current session:**\n${formatSessionListRow(currentSession, currentSession.cwd, true, duplicates)}`;
+            const currentSection = `**Current session:**\n${formatSessionListRow(currentSession, currentSession.cwd, true, duplicates, sessions)}`;
             const otherSection = otherSessions.length === 0
-              ? "**Other sessions:**\nNo other sessions connected. Start another intercom-enabled session with `pi --name worker`, then run `intercom({ action: \"list\" })` again. If an existing Pi session is missing, restart it after installing pi-intercom and check `~/.pi/agent/intercom/config.json`."
-              : `**Other sessions:**\n${otherSessions.map(s => formatSessionListRow(s, currentSession.cwd, false, duplicates)).join("\n")}`;
+              ? "**Other sessions:**\nNo other sessions connected. Start another intercom-enabled session with `pi --name worker`, then run `intercom({ action: \"list\" })` again. If you are dogfooding this local fork without installing it, start the peer with `pi --name worker --extension ./index.ts --skill ./skills`."
+              : `**Other sessions:**\n${otherSessions.map(s => formatSessionListRow(s, currentSession.cwd, false, duplicates, sessions)).join("\n")}`;
 
             return {
               content: [{ type: "text", text: `${currentSection}\n\n${otherSection}` }],
@@ -1598,7 +1615,7 @@ Usage:
           }
 
           try {
-            const target = replyTracker.resolveReplyTarget({ to });
+            const target = replyTracker.resolveReplyTarget({ to, replyTo });
             if (target.from.id === connectedClient.sessionId) {
               return {
                 content: [{ type: "text", text: "Cannot message the current session" }],
@@ -1652,7 +1669,7 @@ Usage:
           const lines = pendingAsks.map(({ from, message, receivedAt }) => {
             const preview = message.content.text.replace(/\s+/g, " ").slice(0, 80);
             const elapsedSeconds = Math.max(0, Math.floor((now - receivedAt) / 1000));
-            const sender = from.name ? `${from.name} (${formatSessionTarget(from)})` : from.id;
+            const sender = from.name ? `${from.name} (${formatSessionTarget(from, pendingAsks.map((ask) => ask.from))})` : from.id;
             return `- ${sender} · ${message.id} · ${elapsedSeconds}s ago · ${preview}`;
           });
           return {
@@ -1776,7 +1793,7 @@ Usage:
     }
     if (!getLiveContext(ctx, overlayGeneration)) return;
 
-    const targetLabel = formatSessionLabel(selectedSession, duplicates);
+    const targetLabel = formatSessionLabel(selectedSession, duplicates, [...sessions, currentSession]);
 
     const result = await ctx.ui.custom<ComposeResult>(
       (tui, theme, keybindings, done) => new ComposeOverlay(tui, theme, keybindings, selectedSession, targetLabel, overlayClient, done),

@@ -8,6 +8,7 @@ export interface ComposeResult {
   sent: boolean;
   messageId?: string;
   text?: string;
+  expectsReply?: boolean;
 }
 
 export class ComposeOverlay implements Component {
@@ -19,6 +20,7 @@ export class ComposeOverlay implements Component {
   private client: IntercomClient;
   private done: (result: ComposeResult) => void;
   private inputBuffer: string = "";
+  private mode: "send" | "ask" = "send";
   private sending: boolean = false;
   private error: string | null = null;
 
@@ -49,6 +51,12 @@ export class ComposeOverlay implements Component {
       return;
     }
 
+    if (data === "\t") {
+      this.mode = this.mode === "send" ? "ask" : "send";
+      this.tui.requestRender();
+      return;
+    }
+
     if (data.startsWith("\x1b")) {
       return;
     }
@@ -66,7 +74,7 @@ export class ComposeOverlay implements Component {
       return;
     }
 
-    const printable = [...data].filter(c => c >= " ").join("");
+    const printable = [...data].filter(c => c >= " " || c === "\n" || c === "\t").join("");
     if (printable) {
       this.inputBuffer += printable;
       this.tui.requestRender();
@@ -79,8 +87,11 @@ export class ComposeOverlay implements Component {
     this.tui.requestRender();
 
     try {
+      const expectsReply = this.mode === "ask";
+      const text = this.inputBuffer;
       const result = await this.client.send(this.target.id, {
-        text: this.inputBuffer.trim(),
+        text,
+        expectsReply,
       });
       
       if (!result.delivered) {
@@ -93,7 +104,8 @@ export class ComposeOverlay implements Component {
       this.done({
         sent: true,
         messageId: result.id,
-        text: this.inputBuffer.trim(),
+        text,
+        expectsReply,
       });
     } catch (error) {
       this.error = error instanceof Error ? error.message : String(error);
@@ -102,10 +114,19 @@ export class ComposeOverlay implements Component {
     }
   }
 
+  private renderInputLines(row: (text?: string) => string, lines: string[]): void {
+    const rawLines = this.inputBuffer.split("\n");
+    const visibleLines = rawLines.slice(-8);
+    visibleLines.forEach((line, index) => {
+      const isLast = index === visibleLines.length - 1;
+      lines.push(row(`${index === 0 ? " > " : "   "}${line}${isLast ? "█" : ""}`));
+    });
+  }
+
   render(width: number): string[] {
     const innerWidth = Math.max(24, Math.min(width - 2, 72));
     const contentWidth = Math.max(1, innerWidth - 2);
-    const footer = `${this.keybindings.getKeys("tui.select.confirm").join("/")}: Send • ${this.keybindings.getKeys("tui.select.cancel").join("/")}: Close`;
+    const footer = `${this.keybindings.getKeys("tui.select.confirm").join("/")}: ${this.mode === "ask" ? "Ask" : "Send"} • Tab: ${this.mode === "ask" ? "Send mode" : "Ask mode"} • ${this.keybindings.getKeys("tui.select.cancel").join("/")}: Close`;
     const border = (text: string) => this.theme.fg("accent", text);
     const row = (text = "") => {
       const clipped = truncateToWidth(text, contentWidth, "", true);
@@ -114,7 +135,7 @@ export class ComposeOverlay implements Component {
 
     const lines: string[] = [];
     lines.push(border(`╭${"─".repeat(contentWidth)}╮`));
-    lines.push(row(this.theme.bold(` Send to: ${this.targetLabel}`)));
+    lines.push(row(this.theme.bold(` ${this.mode === "ask" ? "Ask" : "Send"} to: ${this.targetLabel}`)));
     lines.push(row(this.theme.fg("dim", ` ${this.target.cwd} • ${this.target.model}`)));
     lines.push(border(`├${"─".repeat(contentWidth)}┤`));
     lines.push(row());
@@ -124,9 +145,9 @@ export class ComposeOverlay implements Component {
     } else if (this.error) {
       lines.push(row(this.theme.fg("error", ` Error: ${this.error}`)));
       lines.push(row());
-      lines.push(row(` > ${this.inputBuffer}█`));
+      this.renderInputLines(row, lines);
     } else {
-      lines.push(row(` > ${this.inputBuffer}█`));
+      this.renderInputLines(row, lines);
     }
 
     lines.push(row());

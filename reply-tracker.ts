@@ -7,11 +7,13 @@ export interface IntercomContext {
 }
 
 function matchesPendingSender(context: IntercomContext, to: string): boolean {
-  if (context.from.id === to) {
+  const target = to.trim().toLowerCase();
+  const senderId = context.from.id.toLowerCase();
+  if (senderId === target || senderId.startsWith(target)) {
     return true;
   }
 
-  return context.from.name?.toLowerCase() === to.toLowerCase();
+  return context.from.name?.toLowerCase() === target;
 }
 
 export class ReplyTracker {
@@ -51,26 +53,28 @@ export class ReplyTracker {
   resolveReplyTarget(options: { to?: string }, now = Date.now()): IntercomContext {
     this.pruneExpired(now);
 
-    if (this.currentTurnContext) {
-      return this.currentTurnContext;
-    }
-
     const pending = Array.from(this.pendingAsks.values());
-    if (pending.length === 1) {
-      return pending[0]!;
-    }
 
     if (options.to) {
-      const matches = pending.filter((context) => matchesPendingSender(context, options.to!));
+      const contexts = this.currentTurnContext
+        ? [this.currentTurnContext, ...pending.filter((context) => context.message.id !== this.currentTurnContext?.message.id)]
+        : pending;
+      const matches = contexts.filter((context) => matchesPendingSender(context, options.to!));
       if (matches.length === 1) {
         return matches[0]!;
       }
       if (matches.length > 1) {
         throw new Error(`Multiple pending asks from \"${options.to}\" — use the sender session ID instead.`);
       }
-      if (pending.length > 1) {
-        throw new Error(`No pending ask from \"${options.to}\"`);
-      }
+      throw new Error(`No pending ask from \"${options.to}\"`);
+    }
+
+    if (this.currentTurnContext) {
+      return this.currentTurnContext;
+    }
+
+    if (pending.length === 1) {
+      return pending[0]!;
     }
 
     if (pending.length === 0) {

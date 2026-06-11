@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { EventEmitter, once } from "node:events";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { ReplyTracker } from "./reply-tracker.ts";
+import { ComposeOverlay } from "./ui/compose.ts";
 import type { Message, SessionInfo } from "./types.ts";
 
 const repoDir = process.cwd();
@@ -352,6 +353,151 @@ test("contact supervisor tool renders reason and reply state", async () => {
     }, { isPartial: false }, renderTheme, { isError: false }));
     assert.match(failureText, /✗ Invalid reason/);
   });
+});
+
+test("intercom tool accepts displayed short IDs when session names are duplicated", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  const duplicateA = new IntercomClient();
+  const duplicateB = new IntercomClient();
+  const nameCollision = new IntercomClient();
+  const harness = createExtensionHarness("controller", { hasUI: true });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+
+    await duplicateA.connect({
+      name: "duplicate-worker",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    });
+    await duplicateB.connect({
+      name: "duplicate-worker",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    });
+
+    const duplicateSessions = (await planner.listSessions()).filter((session) => session.name === "duplicate-worker");
+    assert.equal(duplicateSessions.length, 2);
+    const target = duplicateSessions[0]!;
+    const shortTarget = target.id.slice(0, 8);
+    const receiver = duplicateA.sessionId === target.id ? duplicateA : duplicateB;
+    const messagePromise = once(receiver, "message") as Promise<[SessionInfo, Message]>;
+
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const result = await intercomTool.execute("tool-1", {
+      action: "send",
+      to: shortTarget,
+      message: "short id delivery works",
+    }, new AbortController().signal, undefined, harness.ctx);
+
+    assert.equal(result.isError, false);
+    assert.match(result.content[0]?.text ?? "", /fire-and-forget/);
+    const [, message] = await messagePromise;
+    assert.equal(message.content.text, "short id delivery works");
+
+    const listResult = await intercomTool.execute("tool-list", {
+      action: "list",
+    }, new AbortController().signal, undefined, harness.ctx);
+    assert.match(listResult.content[0]?.text ?? "", new RegExp(`target:${shortTarget}`));
+
+    const askMessagePromise = once(receiver, "message") as Promise<[SessionInfo, Message]>;
+    const askResultPromise = intercomTool.execute("tool-ask", {
+      action: "ask",
+      to: shortTarget,
+      message: "short id ask works",
+    }, new AbortController().signal, undefined, harness.ctx);
+    const [askFrom, askMessage] = await askMessagePromise;
+    assert.equal(askMessage.content.text, "short id ask works");
+    assert.equal(askMessage.expectsReply, true);
+    await receiver.send(askFrom.id, { text: "short id ask reply", replyTo: askMessage.id });
+    const askResult = await askResultPromise;
+    assert.equal(askResult.isError, false);
+    assert.match(askResult.content[0]?.text ?? "", /short id ask reply/);
+
+    const duplicateNameResult = await intercomTool.execute("tool-2", {
+      action: "send",
+      to: "duplicate-worker",
+      message: "ambiguous",
+    }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(duplicateNameResult.isError, true);
+    assert.match(duplicateNameResult.content[0]?.text ?? "", /Use one of these targets/);
+    assert.match(duplicateNameResult.content[0]?.text ?? "", new RegExp(shortTarget));
+
+    await nameCollision.connect({
+      name: shortTarget,
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    });
+    const collisionResult = await intercomTool.execute("tool-collision", {
+      action: "send",
+      to: shortTarget,
+      message: "must not silently choose name over short id",
+    }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(collisionResult.isError, true);
+    assert.match(collisionResult.content[0]?.text ?? "", /matches multiple sessions/);
+  } finally {
+    await duplicateA.disconnect().catch(() => undefined);
+    await duplicateB.disconnect().catch(() => undefined);
+    await nameCollision.disconnect().catch(() => undefined);
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("compose overlay preserves pasted multiline handoffs and can send ask-mode messages", async () => {
+  const sent: Array<{ to: string; text: string; expectsReply?: boolean }> = [];
+  let renderRequests = 0;
+  let doneResult: unknown;
+  const keybindings = {
+    matches: (data: string, action: string) => {
+      if (action === "tui.select.cancel") return data === "\x1b";
+      if (action === "tui.select.confirm") return data === "\r";
+      if (action === "tui.editor.deleteCharBackward") return data === "\x7f";
+      return false;
+    },
+    getKeys: (action: string) => action === "tui.select.confirm" ? ["Enter"] : ["Escape"],
+  };
+  const theme = {
+    fg: (_name: string, text: string) => text,
+    bold: (text: string) => text,
+  };
+  const overlay = new ComposeOverlay(
+    { requestRender: () => { renderRequests += 1; } } as never,
+    theme as never,
+    keybindings as never,
+    { id: "target-session", name: "worker", cwd: repoDir, model: "test-model", pid: 1, startedAt: 0, lastActivity: 0 } as SessionInfo,
+    "worker",
+    { send: async (to: string, options: { text: string; expectsReply?: boolean }) => {
+      sent.push({ to, text: options.text, expectsReply: options.expectsReply });
+      return { id: "message-1", delivered: true };
+    } } as never,
+    (result) => { doneResult = result; },
+  );
+
+  overlay.handleInput("\tLine 1\n\tLine 2\n");
+  overlay.handleInput("\t");
+  const rendered = overlay.render(100).join("\n");
+  assert.match(rendered, /Ask to: worker/);
+  assert.match(rendered, /Line 1/);
+  assert.match(rendered, /Line 2/);
+
+  overlay.handleInput("\r");
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(renderRequests >= 2, true);
+  assert.deepEqual(sent, [{ to: "target-session", text: "\tLine 1\n\tLine 2\n", expectsReply: true }]);
+  assert.deepEqual(doneResult, { sent: true, messageId: "message-1", text: "\tLine 1\n\tLine 2\n", expectsReply: true });
 });
 
 test("sessions publish automatic lifecycle status", { concurrency: false }, async () => {

@@ -4,3 +4,6 @@ node_modules/
 
 progress.md
 package-lock.json
+
+# CueLoop local/runtime artifacts (do not commit)
+.cueloop/

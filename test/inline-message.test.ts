@@ -37,3 +37,19 @@ test("inline intercom messages render at the available terminal width", () => {
   assert.ok(lines.length > 0);
   for (const line of lines) assert.equal(visibleWidth(line), 120);
 });
+
+test("inline intercom messages do not duplicate attachment labels when body text includes attachments", () => {
+  const attachmentMessage: Message = {
+    ...message,
+    content: {
+      text: "See attached snippet.",
+      attachments: [{ type: "snippet", name: "example.ts", content: "const ok = true;", language: "typescript" }],
+    },
+  };
+  const bodyText = "See attached snippet.\n\n---\n📎 example.ts\n~~~typescript\nconst ok = true;\n~~~";
+  const component = new InlineMessageComponent(from, attachmentMessage, theme as any, undefined, bodyText);
+
+  const text = component.render(120).join("\n");
+  assert.equal((text.match(/📎 example\.ts/g) ?? []).length, 1);
+  assert.match(text, /const ok = true/);
+});

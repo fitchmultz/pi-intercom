@@ -65,8 +65,9 @@ If a session is unnamed, pi-intercom now exposes a runtime-only fallback alias l
 Press **Alt+M** or type `/intercom` to open the session list overlay:
 
 1. **Select a session** — Use arrow keys to pick a target session
-2. **Compose message** — Write your message in the compose overlay
-3. **Send** — Press Enter to send, Escape to cancel
+2. **Compose message** — Write your message in the compose overlay. Pasted multiline handoffs are preserved.
+3. **Choose mode** — Press Tab to toggle between fire-and-forget Send and Ask mode, which adds a reply hint for the recipient
+4. **Send** — Press Enter to send, Escape to cancel
 
 ### From the Agent
 
@@ -80,9 +81,9 @@ intercom({ action: "list" })
 // → **Other sessions:**
 // → • research (6332faab) — ~/projects/api (claude-sonnet-4) [same cwd, thinking]
 
-// Send a message
+// Send a fire-and-forget message
 intercom({ action: "send", to: "research", message: "Check if UserService.validate() handles null" })
-// → Message sent to research
+// → Message sent to research (fire-and-forget; use `ask` when you need a reply)
 
 // Check connection status
 intercom({ action: "status" })
@@ -206,7 +207,7 @@ This matters because the agent receiving the message doesn't need to reconstruct
 
 ### `send` vs `ask`
 
-`send` is fire-and-forget — the tool returns immediately after delivery. By default, it sends immediately even in interactive sessions. If you want an approval dialog before non-reply sends, set `confirmSend: true` in config. Replies that include `replyTo` still skip confirmation so reply-hint flows can continue without an extra approval step.
+`send` is fire-and-forget — the tool returns immediately after delivery and does not return any later response. Use `ask` for acknowledgements, decisions, or anything where the sender needs the answer in the same workflow. By default, `send` sends immediately even in interactive sessions. If you want an approval dialog before non-reply sends, set `confirmSend: true` in config. Replies that include `replyTo` still skip confirmation so reply-hint flows can continue without an extra approval step.
 
 `ask` sends the message and blocks until the recipient responds (10-minute timeout). The reply comes back as the tool result, so the agent continues in the same turn with full context. No confirmation dialog — if you're asking and waiting, the intent is clear.
 
@@ -336,9 +337,9 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 
 ### intercom actions
 
-**`list`** — Returns the current session plus other active intercom-connected sessions with name, short ID, working directory, model, and live status. Status is derived automatically from Pi lifecycle events: `idle`, `thinking`, or `tool:<name>`.
+**`list`** — Returns the current session plus other active intercom-connected sessions with name, short ID, working directory, model, and live status. Status is derived automatically from Pi lifecycle events: `idle`, `thinking`, or `tool:<name>`. If multiple sessions have the same name, use the displayed short ID target, for example `to: "ca7bfec2"`.
 
-**`send`** — Sends a message to the specified session. By default it sends immediately, including in interactive sessions. Set `confirmSend: true` in config if you want a confirmation dialog for non-reply sends. Replies that include `replyTo` skip confirmation. Returns delivery confirmation.
+**`send`** — Sends a fire-and-forget message to the specified session. By default it sends immediately, including in interactive sessions. Set `confirmSend: true` in config if you want a confirmation dialog for non-reply sends. Replies that include `replyTo` skip confirmation. Returns delivery confirmation, not a later response.
 
 **`ask`** — Sends a message and waits for the recipient to reply (10-minute timeout). The reply is returned as the tool result. No confirmation dialog. Only one pending `ask` is allowed per session at a time. Use this when the agent needs the answer to continue working.
 
@@ -354,7 +355,8 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 |-----|--------|
 | Alt+M | Open session list overlay |
 | ↑/↓ | Navigate session list |
-| Enter | Select session / Send message |
+| Tab | Toggle Send / Ask mode in the compose overlay |
+| Enter | Select session / Send or ask |
 | Escape | Cancel / Close overlay |
 
 ## Config

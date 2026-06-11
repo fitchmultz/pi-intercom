@@ -51,7 +51,7 @@ export class InlineMessageComponent implements Component {
       }
     }
 
-    if (this.message.content.attachments?.length) {
+    if (this.message.content.attachments?.length && !this.bodyText) {
       lines.push(this.theme.fg("accent", `│${" ".repeat(bodyWidth)}│`));
       for (const att of this.message.content.attachments) {
         const label = this.theme.fg("dim", ` 📎 ${att.name}`);

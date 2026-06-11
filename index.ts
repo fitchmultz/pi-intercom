@@ -389,10 +389,22 @@ function formatSessionLabel(session: SessionInfo, duplicates: Set<string>): stri
     ? `${session.name} (${shortSessionId(session.id)})`
     : session.name;
 }
-function formatSessionListRow(session: SessionInfo, currentCwd: string, isSelf: boolean): string {
+function formatSessionTarget(session: SessionInfo): string {
+  return shortSessionId(session.id);
+}
+function formatDuplicateTargetOptions(sessions: SessionInfo[]): string {
+  return sessions
+    .map((session) => `${session.name || session.id.slice(0, 8)} → ${formatSessionTarget(session)}`)
+    .join(", ");
+}
+function formatSessionListRow(session: SessionInfo, currentCwd: string, isSelf: boolean, duplicates = new Set<string>()): string {
   const name = session.name || "Unnamed session";
-  const tags = [isSelf ? "self" : session.cwd === currentCwd ? "same cwd" : undefined, session.status]
-    .filter((tag): tag is string => Boolean(tag));
+  const duplicateName = Boolean(session.name && duplicates.has(session.name.toLowerCase()));
+  const tags = [
+    isSelf ? "self" : session.cwd === currentCwd ? "same cwd" : undefined,
+    session.status,
+    duplicateName ? `target:${formatSessionTarget(session)}` : undefined,
+  ].filter((tag): tag is string => Boolean(tag));
   const suffix = tags.length ? ` [${tags.join(", ")}]` : "";
   return `• ${name} (${shortSessionId(session.id)}) — ${session.cwd} (${session.model})${suffix}`;
 }
@@ -784,17 +796,30 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     return nextReconnectPromise;
   }
   async function resolveSessionTarget(activeClient: IntercomClient, nameOrId: string): Promise<string | null> {
+    const target = nameOrId.trim();
     const sessions = await activeClient.listSessions();
-    const byId = sessions.find(s => s.id === nameOrId);
+    const byId = sessions.find(s => s.id === target);
     if (byId) {
       return byId.id;
     }
-    const lowerName = nameOrId.toLowerCase();
+
+    const lowerName = target.toLowerCase();
     const byName = sessions.filter(s => s.name?.toLowerCase() === lowerName);
-    if (byName.length > 1) {
-      throw new Error(`Multiple sessions named "${nameOrId}" are connected. Use the session ID instead.`);
+    const lowerTarget = target.toLowerCase();
+    const byShortId = sessions.filter(s => s.id.toLowerCase().startsWith(lowerTarget));
+    const candidatesById = new Map<string, SessionInfo>();
+    for (const session of [...byName, ...byShortId]) {
+      candidatesById.set(session.id, session);
     }
-    return byName[0]?.id ?? null;
+
+    if (candidatesById.size === 1) {
+      return Array.from(candidatesById.values())[0]!.id;
+    }
+    if (candidatesById.size > 1) {
+      throw new Error(`Target "${nameOrId}" matches multiple sessions. Use one of these targets: ${formatDuplicateTargetOptions(Array.from(candidatesById.values()))}.`);
+    }
+
+    return null;
   }
   function deliverLocalSubagentRelayMessage(sender: "subagent-control" | "subagent-result", status: string, messageText: string): void {
     const now = Date.now();
@@ -1371,10 +1396,11 @@ Usage:
               };
             }
 
-            const currentSection = `**Current session:**\n${formatSessionListRow(currentSession, currentSession.cwd, true)}`;
+            const duplicates = duplicateSessionNames(sessions);
+            const currentSection = `**Current session:**\n${formatSessionListRow(currentSession, currentSession.cwd, true, duplicates)}`;
             const otherSection = otherSessions.length === 0
-              ? "**Other sessions:**\nNo other sessions connected."
-              : `**Other sessions:**\n${otherSessions.map(s => formatSessionListRow(s, currentSession.cwd, false)).join("\n")}`;
+              ? "**Other sessions:**\nNo other sessions connected. Start another intercom-enabled session with `pi --name worker`, then run `intercom({ action: \"list\" })` again. If an existing Pi session is missing, restart it after installing pi-intercom and check `~/.pi/agent/intercom/config.json`."
+              : `**Other sessions:**\n${otherSessions.map(s => formatSessionListRow(s, currentSession.cwd, false, duplicates)).join("\n")}`;
 
             return {
               content: [{ type: "text", text: `${currentSection}\n\n${otherSection}` }],
@@ -1441,8 +1467,9 @@ Usage:
             if (replyTo) {
               replyTracker.markReplied(replyTo);
             }
+            const replyModeHint = replyTo ? "" : " (fire-and-forget; use `ask` when you need a reply)";
             return {
-              content: [{ type: "text", text: `Message sent to ${to}` }],
+              content: [{ type: "text", text: `Message sent to ${to}${replyModeHint}` }],
               isError: false,
               details: { messageId: result.id, delivered: true },
             };
@@ -1625,7 +1652,8 @@ Usage:
           const lines = pendingAsks.map(({ from, message, receivedAt }) => {
             const preview = message.content.text.replace(/\s+/g, " ").slice(0, 80);
             const elapsedSeconds = Math.max(0, Math.floor((now - receivedAt) / 1000));
-            return `- ${from.name || from.id} · ${message.id} · ${elapsedSeconds}s ago · ${preview}`;
+            const sender = from.name ? `${from.name} (${formatSessionTarget(from)})` : from.id;
+            return `- ${sender} · ${message.id} · ${elapsedSeconds}s ago · ${preview}`;
           });
           return {
             content: [{ type: "text", text: `**Pending asks:**\n${lines.join("\n")}` }],
@@ -1758,11 +1786,11 @@ Usage:
     if (result?.sent && result.messageId && result.text && getLiveContext(ctx, overlayGeneration)) {
       pi.appendEntry("intercom_sent", {
         to: selectedSession.name || selectedSession.id,
-        message: { text: result.text },
+        message: { text: result.text, expectsReply: result.expectsReply },
         messageId: result.messageId,
         timestamp: Date.now(),
       });
-      notifyIfLive(ctx, `Message sent to ${targetLabel}`, "info", overlayGeneration);
+      notifyIfLive(ctx, `${result.expectsReply ? "Ask sent" : "Message sent"} to ${targetLabel}`, "info", overlayGeneration);
     }
   }
 

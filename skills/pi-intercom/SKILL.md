@@ -225,7 +225,7 @@ Same codebase:
 ```bash
 cmux new-split right
 sleep 0.5
-cmux send --surface right 'cd /path/to/current/repo && pi\n'
+cmux send --surface right 'cd /path/to/current/repo && pi --name worker\n'
 ```
 
 Reference codebase:
@@ -233,7 +233,7 @@ Reference codebase:
 ```bash
 cmux new-split right
 sleep 0.5
-cmux send --surface right 'cd /path/to/reference/repo && pi\n'
+cmux send --surface right 'cd /path/to/reference/repo && pi --name reference-scout\n'
 ```
 
 ### Optional Fallback: tmux Worker or Scout Session
@@ -245,7 +245,7 @@ SOCKET_DIR=${TMPDIR:-/tmp}/pi-tmux-sockets
 mkdir -p "$SOCKET_DIR"
 SOCKET="$SOCKET_DIR/pi.sock"
 SESSION=pi-worker
-tmux -S "$SOCKET" new -d -s "$SESSION" -c "/path/to/current/repo" 'pi'
+tmux -S "$SOCKET" new -d -s "$SESSION" -c "/path/to/current/repo" 'pi --name worker'
 ```
 
 Reference codebase:
@@ -255,7 +255,7 @@ SOCKET_DIR=${TMPDIR:-/tmp}/pi-tmux-sockets
 mkdir -p "$SOCKET_DIR"
 SOCKET="$SOCKET_DIR/pi.sock"
 SESSION=pi-reference-auth
-tmux -S "$SOCKET" new -d -s "$SESSION" -c "/path/to/reference/repo" 'pi'
+tmux -S "$SOCKET" new -d -s "$SESSION" -c "/path/to/reference/repo" 'pi --name reference-auth'
 ```
 
 When you use `tmux`, tell the user how to watch it:
@@ -264,14 +264,7 @@ When you use `tmux`, tell the user how to watch it:
 tmux -S "$SOCKET" attach -t "$SESSION"
 ```
 
-After launch, name the new session clearly so it is easy to target:
-
-```text
-/name worker
-/name reference-auth
-```
-
-Then coordinate from the current session:
+The examples above start Pi with `--name` so the peer is targetable immediately. Then coordinate from the current session:
 
 ```typescript
 intercom({
@@ -285,6 +278,28 @@ intercom({
   to: "reference-auth",
   message: "How does this repo structure token refresh retries?"
 })
+```
+
+### Smoke Test a Spawned Peer
+
+After starting a named peer, verify delivery before delegating real work:
+
+```typescript
+intercom({ action: "list" })
+intercom({ action: "ask", to: "worker", message: "Smoke test: reply exactly OK" })
+```
+
+Expected result:
+
+```text
+**Reply from worker:**
+OK
+```
+
+When using tmux, clean up the peer after the test if you do not need it:
+
+```bash
+tmux -S "$SOCKET" kill-session -t "$SESSION"
 ```
 
 ### Spawn Decision Rule

@@ -1032,6 +1032,64 @@ test("busy interactive sessions idle-gate top-level asks without aborting", { co
   }
 });
 
+test("busy interactive sessions request subagent detach before idle-gating supervisor asks", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  let abortCount = 0;
+  let idle = false;
+  const detachRequests: string[] = [];
+  const harness = createExtensionHarness("interactive-supervisor", {
+    abort: () => { abortCount += 1; },
+    hasUI: true,
+    isIdle: () => idle,
+  });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    harness.pi.events.on("pi-intercom:detach-request", (payload: unknown) => {
+      const requestId = payload && typeof payload === "object" ? (payload as { requestId?: unknown }).requestId : undefined;
+      if (typeof requestId !== "string") return;
+      detachRequests.push(requestId);
+      harness.pi.events.emit("pi-intercom:detach-response", { requestId, accepted: true });
+    });
+    await harness.emitLifecycle("session_start");
+
+    const target = await waitForSessionByName(planner, "interactive-supervisor");
+    const delivered = await planner.send(target.id, {
+      messageId: "supervisor-busy-ask",
+      text: [
+        "Subagent needs a supervisor decision.",
+        "Run: run-123",
+        "Agent: scout",
+        "Child index: 0",
+        "Child intercom target: subagent-scout-run-123-1",
+        "",
+        "please reply with approve",
+      ].join("\n"),
+      expectsReply: true,
+    });
+    assert.equal(delivered.delivered, true);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(abortCount, 0);
+    assert.equal(detachRequests.length, 1);
+    assert.equal(harness.sentMessages.length, 0);
+
+    idle = true;
+    await harness.emitLifecycle("agent_end");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.equal(abortCount, 0);
+    assert.equal(harness.sentMessages.length, 1);
+    assert.equal(harness.sentMessages[0]?.message.customType, "intercom_message");
+    assert.equal(harness.sentMessages[0]?.options?.triggerTurn, true);
+    assert.match(harness.sentMessages[0]?.message.content ?? "", /Subagent needs a supervisor decision/);
+    assert.match(harness.sentMessages[0]?.message.content ?? "", /please reply with approve/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
 test("deferred startup connect is cancelled on shutdown", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { planner, cleanup } = await setupClients();

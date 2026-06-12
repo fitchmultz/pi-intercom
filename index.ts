@@ -17,6 +17,9 @@ import { formatSessionTarget, formatTargetOptions, targetDisplayName, resolveSes
 const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
 const SUBAGENT_RESULT_INTERCOM_EVENT = "subagent:result-intercom";
 const SUBAGENT_RESULT_INTERCOM_DELIVERY_EVENT = "subagent:result-intercom-delivery";
+const INTERCOM_DETACH_REQUEST_EVENT = "pi-intercom:detach-request";
+const INTERCOM_DETACH_RESPONSE_EVENT = "pi-intercom:detach-response";
+const INTERCOM_DETACH_RESPONSE_TIMEOUT_MS = 500;
 const INBOUND_FLUSH_DELAY_MS = 200;
 const INBOUND_IDLE_RETRY_MS = 500;
 const DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX = "subagent-chat";
@@ -622,6 +625,40 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         : { deliverAs: "followUp" }
     );
   }
+  function isBlockingSubagentSupervisorMessage(entry: InboundMessageEntry): boolean {
+    if (!entry.message.expectsReply) return false;
+    const text = entry.bodyText.trimStart();
+    return text.startsWith("Subagent needs a supervisor decision.")
+      || text.startsWith("Subagent requests a structured supervisor interview.");
+  }
+  async function requestSubagentDetachForBlockingSupervisorMessage(entry: InboundMessageEntry): Promise<boolean> {
+    if (!isBlockingSubagentSupervisorMessage(entry)) return false;
+    const requestId = randomUUID();
+    return await new Promise<boolean>((resolve) => {
+      let settled = false;
+      let unsubscribe: (() => void) | undefined;
+      const finish = (accepted: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        unsubscribe?.();
+        resolve(accepted);
+      };
+      const timer = setTimeout(() => finish(false), INTERCOM_DETACH_RESPONSE_TIMEOUT_MS);
+      timer.unref?.();
+      unsubscribe = pi.events.on(INTERCOM_DETACH_RESPONSE_EVENT, (payload: unknown) => {
+        if (!payload || typeof payload !== "object") return;
+        const response = payload as { requestId?: unknown; accepted?: unknown };
+        if (response.requestId !== requestId) return;
+        finish(response.accepted === true);
+      });
+      try {
+        pi.events.emit(INTERCOM_DETACH_REQUEST_EVENT, { requestId });
+      } catch {
+        finish(false);
+      }
+    });
+  }
   function scheduleInboundFlush(delayMs = INBOUND_FLUSH_DELAY_MS): void {
     if (!getLiveContext()) {
       return;
@@ -710,6 +747,10 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
               // Best-effort reply; keep the busy non-interactive session running either way.
             }
           }
+          return;
+        }
+        await requestSubagentDetachForBlockingSupervisorMessage(entry);
+        if (!getLiveContext(liveContext, messageGeneration)) {
           return;
         }
         queueIdleMessage(entry);

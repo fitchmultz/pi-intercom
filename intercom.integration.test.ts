@@ -1545,7 +1545,7 @@ test("full ask/reply round-trip works with reply target resolved from current tu
 test("subagent control intercom events wake the current orchestrator session", async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const events = new EventEmitter();
-  const sentMessages: Array<{ message: { customType?: string; content?: string }; options?: { triggerTurn?: boolean } }> = [];
+  const sentMessages: Array<{ message: { customType?: string; content?: string; display?: boolean }; options?: { triggerTurn?: boolean } }> = [];
   const pi = {
     getSessionName: () => "orchestrator",
     events: {
@@ -1560,7 +1560,7 @@ test("subagent control intercom events wake the current orchestrator session", a
     registerTool: () => undefined,
     registerCommand: () => undefined,
     registerShortcut: () => undefined,
-    sendMessage: (message: { customType?: string; content?: string }, options?: { triggerTurn?: boolean }) => {
+    sendMessage: (message: { customType?: string; content?: string; display?: boolean }, options?: { triggerTurn?: boolean }) => {
       sentMessages.push({ message, options });
     },
     appendEntry: () => undefined,
@@ -1576,6 +1576,21 @@ test("subagent control intercom events wake the current orchestrator session", a
   assert.equal(sentMessages.length, 1);
   assert.equal(sentMessages[0]?.message.customType, "intercom_message");
   assert.match(sentMessages[0]?.message.content ?? "", /From subagent-control/);
+  assert.match(sentMessages[0]?.message.content ?? "", /worker needs attention in run 78f659a3/);
+  assert.equal(sentMessages[0]?.options?.triggerTurn, true);
+
+  sentMessages.length = 0;
+  pi.events.emit("subagent:control-intercom", {
+    to: "orchestrator",
+    source: "foreground",
+    message: "subagent needs attention\n\nworker needs attention in run 78f659a3.",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(sentMessages.length, 1);
+  assert.equal(sentMessages[0]?.message.customType, "intercom_message");
+  assert.equal(sentMessages[0]?.message.display, false);
+  assert.doesNotMatch(sentMessages[0]?.message.content ?? "", /From subagent-control/);
   assert.match(sentMessages[0]?.message.content ?? "", /worker needs attention in run 78f659a3/);
   assert.equal(sentMessages[0]?.options?.triggerTurn, true);
 });

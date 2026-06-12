@@ -878,9 +878,9 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     return null;
   }
-  function deliverLocalSubagentRelayMessage(sender: "subagent-control" | "subagent-result", status: string, messageText: string): void {
+  function deliverLocalSubagentRelayMessage(sender: "subagent-control" | "subagent-result", status: string, messageText: string, options: { display?: boolean } = {}): void {
     const now = Date.now();
-    sendIncomingMessage({
+    const entry = {
       from: {
         id: sender,
         name: sender,
@@ -897,7 +897,21 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         content: { text: messageText },
       },
       bodyText: messageText,
-    }, "trigger");
+    };
+    if (options.display === false) {
+      replyTracker.queueTurnContext({ from: entry.from, message: entry.message, receivedAt: now });
+      pi.sendMessage(
+        {
+          customType: "intercom_message",
+          content: messageText,
+          display: false,
+          details: entry,
+        },
+        { triggerTurn: true },
+      );
+      return;
+    }
+    sendIncomingMessage(entry, "trigger");
   }
   function recordSubagentDeliveryError(entryType: string, to: string, message: string, error: unknown): void {
     pi.appendEntry(entryType, {
@@ -935,7 +949,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           if (options.acknowledge) emitResultDelivery(parsed.requestId, true);
           return;
         }
-        deliverLocalSubagentRelayMessage(options.sender, options.status, parsed.message);
+        deliverLocalSubagentRelayMessage(options.sender, options.status, parsed.message, { display: !(options.sender === "subagent-control" && parsed.source === "foreground") });
         if (options.acknowledge) emitResultDelivery(parsed.requestId, true);
         return;
       }
@@ -960,7 +974,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           if (options.acknowledge) emitResultDelivery(parsed.requestId, true);
           return;
         }
-        deliverLocalSubagentRelayMessage(options.sender, options.status, parsed.message);
+        deliverLocalSubagentRelayMessage(options.sender, options.status, parsed.message, { display: !(options.sender === "subagent-control" && parsed.source === "foreground") });
         if (options.acknowledge) emitResultDelivery(parsed.requestId, true);
         return;
       }

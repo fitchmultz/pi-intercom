@@ -1587,12 +1587,7 @@ test("subagent control intercom events wake the current orchestrator session", a
   });
   await new Promise((resolve) => setImmediate(resolve));
 
-  assert.equal(sentMessages.length, 1);
-  assert.equal(sentMessages[0]?.message.customType, "intercom_message");
-  assert.equal(sentMessages[0]?.message.display, false);
-  assert.doesNotMatch(sentMessages[0]?.message.content ?? "", /From subagent-control/);
-  assert.match(sentMessages[0]?.message.content ?? "", /worker needs attention in run 78f659a3/);
-  assert.equal(sentMessages[0]?.options?.triggerTurn, true);
+  assert.deepEqual(sentMessages, []);
 });
 
 test("async subagent result intercom events wake the current orchestrator session", async () => {

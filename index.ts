@@ -878,9 +878,9 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     return null;
   }
-  function deliverLocalSubagentRelayMessage(sender: "subagent-control" | "subagent-result", status: string, messageText: string, options: { display?: boolean } = {}): void {
+  function deliverLocalSubagentRelayMessage(sender: "subagent-control" | "subagent-result", status: string, messageText: string): void {
     const now = Date.now();
-    const entry = {
+    sendIncomingMessage({
       from: {
         id: sender,
         name: sender,
@@ -897,21 +897,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         content: { text: messageText },
       },
       bodyText: messageText,
-    };
-    if (options.display === false) {
-      replyTracker.queueTurnContext({ from: entry.from, message: entry.message, receivedAt: now });
-      pi.sendMessage(
-        {
-          customType: "intercom_message",
-          content: messageText,
-          display: false,
-          details: entry,
-        },
-        { triggerTurn: true },
-      );
-      return;
-    }
-    sendIncomingMessage(entry, "trigger");
+    }, "trigger");
   }
   function recordSubagentDeliveryError(entryType: string, to: string, message: string, error: unknown): void {
     pi.appendEntry(entryType, {
@@ -945,11 +931,11 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         return;
       }
       if (currentSessionTargetMatches(parsed.to)) {
-        if (options.sender === "subagent-result" && parsed.source === "foreground") {
+        if (parsed.source === "foreground" && (options.sender === "subagent-result" || options.sender === "subagent-control")) {
           if (options.acknowledge) emitResultDelivery(parsed.requestId, true);
           return;
         }
-        deliverLocalSubagentRelayMessage(options.sender, options.status, parsed.message, { display: !(options.sender === "subagent-control" && parsed.source === "foreground") });
+        deliverLocalSubagentRelayMessage(options.sender, options.status, parsed.message);
         if (options.acknowledge) emitResultDelivery(parsed.requestId, true);
         return;
       }
@@ -970,11 +956,11 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         return;
       }
       if (currentSessionTargetMatches(parsed.to, target, activeClient)) {
-        if (options.sender === "subagent-result" && parsed.source === "foreground") {
+        if (parsed.source === "foreground" && (options.sender === "subagent-result" || options.sender === "subagent-control")) {
           if (options.acknowledge) emitResultDelivery(parsed.requestId, true);
           return;
         }
-        deliverLocalSubagentRelayMessage(options.sender, options.status, parsed.message, { display: !(options.sender === "subagent-control" && parsed.source === "foreground") });
+        deliverLocalSubagentRelayMessage(options.sender, options.status, parsed.message);
         if (options.acknowledge) emitResultDelivery(parsed.requestId, true);
         return;
       }

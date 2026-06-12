@@ -1588,6 +1588,15 @@ test("subagent control intercom events wake the current orchestrator session", a
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.deepEqual(sentMessages, []);
+
+  pi.events.emit("subagent:control-intercom", {
+    to: "orchestrator",
+    source: "async",
+    message: "subagent needs attention\n\nworker needs attention in run async-1.",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(sentMessages, []);
 });
 
 test("async subagent result intercom events wake the current orchestrator session", async () => {

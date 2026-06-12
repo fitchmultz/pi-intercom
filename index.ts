@@ -931,7 +931,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         return;
       }
       if (currentSessionTargetMatches(parsed.to)) {
-        if (parsed.source === "foreground" && (options.sender === "subagent-result" || options.sender === "subagent-control")) {
+        if ((options.sender === "subagent-result" && parsed.source === "foreground")
+          || (options.sender === "subagent-control" && (parsed.source === "foreground" || parsed.source === "async"))) {
           if (options.acknowledge) emitResultDelivery(parsed.requestId, true);
           return;
         }
@@ -956,7 +957,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         return;
       }
       if (currentSessionTargetMatches(parsed.to, target, activeClient)) {
-        if (parsed.source === "foreground" && (options.sender === "subagent-result" || options.sender === "subagent-control")) {
+        if ((options.sender === "subagent-result" && parsed.source === "foreground")
+          || (options.sender === "subagent-control" && (parsed.source === "foreground" || parsed.source === "async"))) {
           if (options.acknowledge) emitResultDelivery(parsed.requestId, true);
           return;
         }

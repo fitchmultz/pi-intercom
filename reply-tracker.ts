@@ -51,6 +51,7 @@ export class ReplyTracker {
   }
 
   queueTurnContext(context: IntercomContext): void {
+    if (!context.message.expectsReply) return;
     this.pendingTurnContexts.push(context);
   }
 

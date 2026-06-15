@@ -21,12 +21,22 @@ const childEnvKeys = [
 const sharedHomeDir = mkdtempSync(path.join(tmpdir(), "pic-"));
 const previousHome = process.env.HOME;
 const previousUserProfile = process.env.USERPROFILE;
+const previousChildEnv = new Map<string, string | undefined>();
+for (const key of childEnvKeys) {
+  previousChildEnv.set(key, process.env[key]);
+  delete process.env[key];
+}
 process.env.HOME = sharedHomeDir;
 process.env.USERPROFILE = sharedHomeDir;
 const { IntercomClient } = await import("./broker/client.ts");
 process.on("exit", () => {
   process.env.HOME = previousHome;
   process.env.USERPROFILE = previousUserProfile;
+  for (const key of childEnvKeys) {
+    const value = previousChildEnv.get(key);
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   rmSync(sharedHomeDir, { recursive: true, force: true });
 });
 

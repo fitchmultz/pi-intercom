@@ -37,6 +37,19 @@ test("reply resolves from current triggered message context", () => {
   assert.equal(tracker.resolveReplyTarget({}, 1002).from.id, "planner-id");
 });
 
+test("non-ask trigger context does not override a pending ask reply target", () => {
+  const tracker = new ReplyTracker();
+  const ask = tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "Need a decision"), 1000);
+  const result = tracker.recordIncomingMessage(createSession("result-id", "subagent-result"), createMessage("result-1", "Done", false), 1001);
+
+  tracker.queueTurnContext(result);
+  tracker.beginTurn(1002);
+
+  assert.equal(tracker.currentTurn(), null);
+  assert.equal(tracker.resolveReplyTarget({}, 1003).message.id, ask.message.id);
+  assert.equal(tracker.resolveReplyTarget({}, 1003).from.id, "planner-id");
+});
+
 test("reply resolves from single pending ask without current turn context", () => {
   const tracker = new ReplyTracker();
   tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "Need a decision"), 1000);

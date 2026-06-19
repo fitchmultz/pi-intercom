@@ -1,5 +1,6 @@
+import { createHash } from "crypto";
 import { join } from "path";
-import { homedir } from "os";
+import { homedir, tmpdir } from "os";
 
 function sanitizePipeSegment(value: string): string {
   return value
@@ -16,5 +17,6 @@ export function getBrokerSocketPath(
     return `\\\\.\\pipe\\pi-intercom-${sanitizePipeSegment(homeDir)}`;
   }
 
-  return join(homeDir, ".pi/agent/intercom/broker.sock");
+  const digest = createHash("sha256").update(homeDir).digest("hex").slice(0, 16);
+  return join(tmpdir(), `pi-intercom-${digest}.sock`);
 }

@@ -4,6 +4,10 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Fixed
+- Default broker startup now launches the package-local `tsx` CLI through the current Node executable instead of relying on `npx`, avoiding shell/shim failures in isolated Pi homes.
+- macOS/Linux broker sockets now use a short temp path to avoid Unix socket path length failures in deep temporary homes.
+
 ## [0.6.0] - 2026-05-03
 
 ### Added

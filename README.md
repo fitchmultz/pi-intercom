@@ -39,9 +39,16 @@ Run that from this local fork checkout, then restart Pi in the project. The exte
 ```bash
 npm run typecheck
 npm test
+npm run smoke:real-pi
 ```
 
-`typecheck` validates the extension against the current `@earendil-works` Pi runtime packages.
+`typecheck` validates the extension against the current `@earendil-works` Pi runtime packages. `smoke:real-pi` installs this checkout into an isolated temporary Pi home and verifies the package shows up in `pi list`. For live model-backed status/list checks, run:
+
+```bash
+PI_REAL_SMOKE_MODEL=openai/gpt-4o-mini npm run smoke:real-pi -- --llm
+```
+
+The `--llm` mode copies local `auth.json` and `models.json` into the isolated Pi agent dir. Set `PI_REAL_SMOKE_AUTH_AGENT_DIR` if your auth files are not in `~/.pi/agent`.
 
 **Recommended:** Add this snippet to your project's `AGENTS.md` to help agents understand when to coordinate across sessions:
 
@@ -302,7 +309,7 @@ Child index: 0
 Which API should I use?
 ```
 
-Reply hints work the same as regular `intercom` ask/reply flows. The supervisor can reply with `intercom({ action: "reply", message: "..." })` and the subagent receives the answer as the tool result.
+Reply hints work the same as regular `intercom` ask/reply flows. The supervisor can reply with `intercom({ action: "reply", message: "..." })` and the subagent receives the answer as the tool result. If the parent agent is busy and later needs to recover the request, `intercom({ action: "pending" })` summarizes supervisor asks with run id, agent, child target, and question text.
 
 For `interview_request`, the supervisor message includes the structured questions plus a fenced JSON answer example using this stable shape:
 
@@ -355,7 +362,7 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 
 **`reply`** — Replies to the current intercom-triggered message if there is one. Otherwise it falls back to the single unresolved inbound ask. If multiple asks are pending, pass `to` or inspect them with `pending` first. Under the hood this is still a normal `send` with the exact `replyTo` value.
 
-**`pending`** — Lists unresolved inbound asks with sender, message ID, elapsed time, and a short preview. Useful when replying after the original triggered turn.
+**`pending`** — Lists unresolved inbound asks with sender, message ID, elapsed time, and a short preview. For `pi-subagents` supervisor asks, the preview expands the run id, agent, child intercom target, and question so the parent can reply without guessing. Useful when replying after the original triggered turn.
 
 **`status`** — Shows connection status, session ID, and total count of active sessions (including the current session).
 
@@ -386,8 +393,8 @@ Create `~/.pi/agent/intercom/config.json`:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `brokerCommand` | `"npx"` | Command used to start the local broker process |
-| `brokerArgs` | `["--no-install", "tsx"]` | Arguments passed to `brokerCommand` before the broker script path |
+| `brokerCommand` | `"npx"` | Command used to start the local broker process when you override the default |
+| `brokerArgs` | `["--no-install", "tsx"]` | Arguments passed to `brokerCommand` before the broker script path. The built-in default launches the package-local `tsx` CLI through the current Node executable to avoid shell/shim issues. |
 | `confirmSend` | false | Show a confirmation dialog before non-reply sends from an interactive session with UI |
 | `enabled` | true | Enable/disable intercom entirely |
 | `replyHint` | true | Include reply instructions in incoming asks |
@@ -436,11 +443,11 @@ Messages use length-prefixed JSON over a local socket/pipe transport (4-byte len
 
 Async extension work (startup, inbound flushes, reconnects, overlays, and relays) no-ops if the session shuts down or reloads before it settles.
 
-Runtime files live at `~/.pi/agent/intercom/`:
-- `broker.sock` — Unix domain socket for communication (macOS/Linux only; Windows uses a named pipe instead)
-- `broker-launch.vbs` — Windows helper script used to launch the broker without a console window
-- `broker.pid` — Broker process ID
-- `config.json` — User configuration
+Runtime files:
+- Unix domain socket — short temp path named `pi-intercom-<hash>.sock` on macOS/Linux; Windows uses a named pipe instead
+- `~/.pi/agent/intercom/broker-launch.vbs` — Windows helper script used to launch the broker without a console window
+- `~/.pi/agent/intercom/broker.pid` — Broker process ID
+- `~/.pi/agent/intercom/config.json` — User configuration
 
 ## Design Decisions
 

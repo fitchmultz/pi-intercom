@@ -76,12 +76,11 @@ test("getBrokerLaunchSpec uses custom broker command on Windows", () => {
   }
 });
 
-test("getBrokerLaunchSpec uses npx + tsx on non-Windows", () => {
+test("getBrokerLaunchSpec uses node + local tsx on non-Windows by default", () => {
   const spec = getBrokerLaunchSpec("C:/repo/broker.ts", "npx", ["--no-install", "tsx"], "C:/repo", "linux", "/tmp/intercom", "/usr/bin/node");
-  assert.equal(spec.command, "npx");
+  assert.equal(spec.command, "/usr/bin/node");
   assert.deepEqual(spec.args, [
-    "--no-install",
-    "tsx",
+    path.join("C:/repo", "node_modules", "tsx", "dist", "cli.mjs"),
     "C:/repo/broker.ts",
   ]);
   assert.equal(spec.kind, "direct");

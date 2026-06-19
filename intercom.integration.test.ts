@@ -1552,6 +1552,48 @@ test("full ask/reply round-trip works with reply target resolved from current tu
   }
 });
 
+test("pending output expands subagent supervisor asks", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("pending-worker", { hasUI: true });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const target = await waitForSessionByName(planner, "pending-worker");
+
+    await planner.send(target.id, {
+      messageId: "supervisor-pending-ask",
+      text: [
+        "Subagent needs a supervisor decision.",
+        "Run: 78f659a3",
+        "Agent: worker",
+        "Child index: 0",
+        "Child intercom target: subagent-worker-78f659a3-1",
+        "",
+        "Should I use the stable API or experimental API?",
+      ].join("\n"),
+      expectsReply: true,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const result = await intercomTool.execute("pending-supervisor", {
+      action: "pending",
+    }, new AbortController().signal, undefined, harness.ctx);
+
+    const text = result.content[0]?.text ?? "";
+    assert.match(text, /supervisor decision/);
+    assert.match(text, /run=78f659a3/);
+    assert.match(text, /agent=worker/);
+    assert.match(text, /target=subagent-worker-78f659a3-1/);
+    assert.match(text, /question=Should I use the stable API or experimental API\?/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
 test("subagent control intercom events wake the current orchestrator session", async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const events = new EventEmitter();

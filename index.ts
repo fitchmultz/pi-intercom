@@ -430,6 +430,24 @@ function previewText(value: unknown, maxLength = 72): string | undefined {
   }
   return normalized.length > maxLength ? `${normalized.slice(0, maxLength - 1)}…` : normalized;
 }
+function pendingAskPreview(message: Message): string {
+  const text = message.content.text;
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (text.startsWith("Subagent needs a supervisor decision.") || text.startsWith("Subagent requests a structured supervisor interview.")) {
+    const run = text.match(/^Run:\s*(.+)$/m)?.[1]?.trim();
+    const agent = text.match(/^Agent:\s*(.+)$/m)?.[1]?.trim();
+    const childTarget = text.match(/^Child intercom target:\s*(.+)$/m)?.[1]?.trim();
+    const body = text.split(/\n\s*\n/).slice(1).join(" ").replace(/\s+/g, " ").trim();
+    return [
+      text.startsWith("Subagent requests") ? "structured supervisor interview" : "supervisor decision",
+      run ? `run=${run}` : undefined,
+      agent ? `agent=${agent}` : undefined,
+      childTarget ? `target=${childTarget}` : undefined,
+      body ? `question=${previewText(body, 180)}` : undefined,
+    ].filter((part): part is string => Boolean(part)).join(" · ");
+  }
+  return previewText(normalized, 180) ?? normalized;
+}
 function firstTextContent(result: { content?: Array<{ type: string; text?: string }> }): string {
   return result.content?.find((item) => item.type === "text" && typeof item.text === "string")?.text?.replace(/\*\*/g, "") ?? "";
 }
@@ -1750,7 +1768,7 @@ Usage:
 
           const now = Date.now();
           const lines = pendingAsks.map(({ from, message, receivedAt }) => {
-            const preview = message.content.text.replace(/\s+/g, " ").slice(0, 80);
+            const preview = pendingAskPreview(message);
             const elapsedSeconds = Math.max(0, Math.floor((now - receivedAt) / 1000));
             const sender = from.name ? `${from.name} (${formatSessionTarget(from, pendingAsks.map((ask) => ask.from))})` : from.id;
             return `- ${sender} · ${message.id} · ${elapsedSeconds}s ago · ${preview}`;

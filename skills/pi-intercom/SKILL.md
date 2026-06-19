@@ -1,6 +1,6 @@
 ---
 name: pi-intercom
-description: Use this skill when coordinating local pi sessions with pi-intercom: list peers, send passive updates, ask blocking questions, reply to inbound asks, or handle pi-subagents supervisor escalations. Do not use for generic chat, remote or cross-machine messaging, unrelated repos, trivial questions, or work the current session can finish alone.
+description: "Use this skill when coordinating local pi sessions with pi-intercom: list peers, send passive updates, ask blocking questions, reply to inbound asks, or handle pi-subagents supervisor escalations. Do not use for generic chat, remote or cross-machine messaging, unrelated repos, trivial questions, or work the current session can finish alone."
 ---
 
 # Pi Intercom

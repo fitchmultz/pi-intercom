@@ -969,7 +969,10 @@ test("sessions publish automatic lifecycle status", { concurrency: false }, asyn
     piIntercomExtension(harness.pi as never);
     await harness.emitLifecycle("session_start");
 
-    await waitForSessionStatus(planner, "status-worker", "idle");
+    let statusSession = await waitForSessionStatus(planner, "status-worker", "idle");
+    assert.equal(statusSession.acceptsAsks, true);
+    assert.equal(statusSession.pendingAsks, 0);
+    assert.equal(typeof statusSession.lastSeen, "number");
 
     const freshEventContext = {
       ...harness.ctx,
@@ -980,7 +983,8 @@ test("sessions publish automatic lifecycle status", { concurrency: false }, asyn
     await waitForSessionModel(planner, "status-worker", "fresh-model");
 
     await harness.emitLifecycle("agent_start");
-    await waitForSessionStatus(planner, "status-worker", "thinking");
+    statusSession = await waitForSessionStatus(planner, "status-worker", "thinking");
+    assert.equal(statusSession.acceptsAsks, false);
 
     await harness.emitLifecycle("tool_execution_start", { toolCallId: "tool-1", toolName: "bash" });
     await waitForSessionStatus(planner, "status-worker", "tool:bash");
@@ -993,9 +997,57 @@ test("sessions publish automatic lifecycle status", { concurrency: false }, asyn
     await waitForSessionStatus(planner, "status-worker", "thinking");
 
     await harness.emitLifecycle("agent_end");
-    await waitForSessionStatus(planner, "status-worker", "idle");
+    statusSession = await waitForSessionStatus(planner, "status-worker", "idle");
+    assert.equal(statusSession.acceptsAsks, true);
   } finally {
     await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("intercom ask returns delivered peer_idle when target publishes acceptsAsks false", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  const peer = new IntercomClient();
+  const harness = createExtensionHarness("ask-controller", { hasUI: true });
+
+  try {
+    await peer.connect({
+      name: "busy-peer-health",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+      acceptsAsks: false,
+      pendingAsks: 1,
+      lastIntercomActivity: 0,
+    });
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    await waitForSessionByName(planner, "ask-controller");
+    const target = await waitForSessionByName(planner, "busy-peer-health");
+    assert.equal(target.acceptsAsks, false);
+
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom");
+    assert.ok(intercomTool);
+    const received = once(peer, "message") as Promise<[SessionInfo, Message]>;
+    const result = await intercomTool.execute("ask-peer-idle", {
+      action: "ask",
+      to: "busy-peer-health",
+      message: "Can you answer?",
+    }, new AbortController().signal, undefined, harness.ctx);
+    const [, message] = await received;
+
+    assert.equal(message.expectsReply, true);
+    assert.equal(result.isError, false);
+    assert.match(result.content[0]?.text ?? "", /peer_idle/);
+    assert.equal(result.details?.delivered, true);
+    assert.equal(result.details?.replied, false);
+    assert.equal(result.details?.reason, "peer_idle");
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await peer.disconnect().catch(() => undefined);
     await cleanup();
   }
 });

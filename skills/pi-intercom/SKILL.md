@@ -46,7 +46,7 @@ intercom({ action: "list" })
 | Action | Use for | Effect |
 | --- | --- | --- |
 | `send` | Context drops, progress, non-blocking notices | Passive fire-and-forget; does not wake the model |
-| `ask` | Decisions, clarifications, ACKs needed now | Wakes the recipient and waits up to 10 minutes |
+| `ask` | Decisions, clarifications, ACKs needed now | Wakes the recipient and waits up to `askTimeoutMs` (default 2 minutes); if peer health says `accepts_asks:false`, returns `delivered:true`, `replied:false`, `reason:"peer_idle"` |
 | `reply` | Answering an inbound ask | Uses the active ask, or the single pending ask |
 | `pending` | Multiple or delayed inbound asks | Lists unresolved asks so you can disambiguate |
 | `status` | Troubleshooting connection state | Shows connection and active session count |

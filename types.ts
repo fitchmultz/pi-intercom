@@ -7,6 +7,14 @@ export interface SessionInfo {
   startedAt: number;
   lastActivity: number;
   status?: string;
+  /** Last time the broker observed any activity from this session (liveness). */
+  lastSeen?: number;
+  /** Last time this session exchanged an intercom message (send/receive). */
+  lastIntercomActivity?: number;
+  /** Number of inbound asks this session still owes a reply to. */
+  pendingAsks?: number;
+  /** Whether this session is currently willing/able to answer asks. */
+  acceptsAsks?: boolean;
 }
 
 export interface Message {
@@ -32,7 +40,7 @@ export type ClientMessage =
   | { type: "unregister" }
   | { type: "list"; requestId: string }
   | { type: "send"; to: string; message: Message }
-  | { type: "presence"; name?: string; status?: string; model?: string };
+  | { type: "presence"; name?: string; status?: string; model?: string; pendingAsks?: number; acceptsAsks?: boolean; lastIntercomActivity?: number };
 
 export type BrokerMessage =
   | { type: "registered"; sessionId: string }

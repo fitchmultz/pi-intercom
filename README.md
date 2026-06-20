@@ -226,7 +226,7 @@ This matters because the agent receiving the message doesn't need to reconstruct
 
 `send` is fire-and-forget — the tool returns immediately after delivery and does not return any later response. It renders in the recipient session without waking the recipient model, so use it for notifications, progress, and context drops. Use `ask` for acknowledgements, decisions, or anything where the sender needs the answer in the same workflow. If you want an approval dialog before non-reply sends, set `confirmSend: true` in config. Replies that include `replyTo` still skip confirmation so reply-hint flows can continue without an extra approval step.
 
-`ask` sends the message and blocks until the recipient responds (10-minute timeout). The reply comes back as the tool result, so the agent continues in the same turn with full context. No confirmation dialog — if you're asking and waiting, the intent is clear.
+`ask` sends the message and waits up to `askTimeoutMs` (default 2 minutes). If the peer publishes `accepts_asks:false`, the ask is still delivered but the tool returns promptly with `delivered:true`, `replied:false`, and `reason:"peer_idle"` instead of burning the full timeout. The peer can reply later as a normal intercom message.
 
 `reply` is receiver-side sugar for replying to an inbound ask. In the turn triggered by an incoming intercom ask, `intercom({ action: "reply", message: "..." })` targets that exact sender and message automatically. If you reply later, it falls back to the single unresolved inbound ask. If multiple asks are pending, use `intercom({ action: "pending" })` to inspect them and then call `reply` with `to` to disambiguate.
 
@@ -251,11 +251,13 @@ If any are missing, the session falls back to the regular `intercom` tool. A sub
 
 | Reason | Behavior | Use When |
 |--------|----------|----------|
-| `need_decision` | Sends an ask and blocks until the supervisor replies (10-minute timeout) | The subagent is blocked, uncertain, needs approval, or faces a product/API/scope decision |
+| `need_decision` | Sends an ask and blocks until the supervisor replies (`askTimeoutMs`, default 2 minutes) | The subagent is blocked, uncertain, needs approval, or faces a product/API/scope decision |
 | `interview_request` | Sends structured questions and blocks until the supervisor replies | The subagent needs multiple machine-readable answers from the supervisor in one exchange |
 | `progress_update` | Fire-and-forget update to the supervisor | Meaningful progress or unexpected discoveries that change the plan |
 
 Do not use `contact_supervisor` for routine completion handoffs. Return the final subagent result normally through `pi-subagents`.
+
+Intercom delivery is for live coordination and grouped completion notices. Durable subagent output still lives in `pi-subagents` result details and artifact/output paths (`savedOutputPath`, `artifactPaths`, or explicit workspace `output` files). If a grouped intercom notice says output was delivered, use it as a notification; use the artifact or explicit output path as the source of truth for long reports.
 
 ### Example: Blocked Subagent Asks for Guidance
 
@@ -346,7 +348,7 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 | `message` | string | The decision request, optional interview note, or progress update |
 | `interview` | object | Required for `interview_request`: `{ title?, description?, questions: [...] }` |
 
-**`need_decision`** — Sends a formatted ask to the supervisor and blocks until it replies (10-minute timeout). The reply comes back as the tool result. Includes run metadata in the message so the supervisor knows which subagent is asking.
+**`need_decision`** — Sends a formatted ask to the supervisor and blocks until it replies (`askTimeoutMs`, default 2 minutes). The reply comes back as the tool result. Includes run metadata in the message so the supervisor knows which subagent is asking.
 
 **`interview_request`** — Sends a formatted, agent-readable interview to the supervisor and blocks until it replies. Questions use a local pi-interview-like shape: `{ id, type, question, options?, context? }` where `type` is `single`, `multi`, `text`, `image`, or `info`. `info` questions are context-only and do not need responses. The supervisor reply should be JSON with `{ "responses": [{ "id": "...", "value": ... }] }`. Parsed JSON replies are returned in `details.structuredReply`.
 
@@ -354,11 +356,11 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 
 ### intercom actions
 
-**`list`** — Returns the current session plus other active intercom-connected sessions with name, safe target, working directory, model, and live status. Status is derived automatically from Pi lifecycle events: `idle`, `thinking`, or `tool:<name>`. If multiple sessions have the same name, use the displayed target exactly as shown, for example `to: "ca7bfec2"`. The target may be longer than eight characters when needed to avoid collisions.
+**`list`** — Returns the current session plus other active intercom-connected sessions with name, safe target, working directory, model, live status, and peer health tags: `accepts_asks`, `pending_asks`, `last_intercom_activity`, and `last_seen`. Status is derived automatically from Pi lifecycle events: `idle`, `thinking`, or `tool:<name>`. If multiple sessions have the same name, use the displayed target exactly as shown, for example `to: "ca7bfec2"`. The target may be longer than eight characters when needed to avoid collisions.
 
 **`send`** — Sends a fire-and-forget message to the specified session. It renders passively and does not wake the recipient model. Set `confirmSend: true` in config if you want a confirmation dialog for non-reply sends. Replies that include `replyTo` skip confirmation. Returns delivery confirmation, not a later response.
 
-**`ask`** — Sends a message and waits for the recipient to reply (10-minute timeout). The reply is returned as the tool result. No confirmation dialog. Only one pending `ask` is allowed per session at a time. Use this when the agent needs the answer to continue working.
+**`ask`** — Sends a message and waits for the recipient to reply (`askTimeoutMs`, default 2 minutes). The reply is returned as the tool result. If the target publishes `accepts_asks:false`, the ask is delivered and the tool returns promptly with `replied:false` and `reason:"peer_idle"`. No confirmation dialog. Only one pending waiting `ask` is allowed per session at a time. Use this when the agent needs the answer to continue working.
 
 **`reply`** — Replies to the current intercom-triggered message if there is one. Otherwise it falls back to the single unresolved inbound ask. If multiple asks are pending, pass `to` or inspect them with `pending` first. Under the hood this is still a normal `send` with the exact `replyTo` value.
 
@@ -387,6 +389,9 @@ Create `~/.pi/agent/intercom/config.json`:
   "confirmSend": false,
   "enabled": true,
   "replyHint": true,
+  "askTimeoutMs": 120000,
+  "sendTimeoutMs": 8000,
+  "listTimeoutMs": 5000,
   "status": "researching"
 }
 ```
@@ -398,6 +403,9 @@ Create `~/.pi/agent/intercom/config.json`:
 | `confirmSend` | false | Show a confirmation dialog before non-reply sends from an interactive session with UI |
 | `enabled` | true | Enable/disable intercom entirely |
 | `replyHint` | true | Include reply instructions in incoming asks |
+| `askTimeoutMs` | `120000` | Reply wait timeout for `ask` and blocking supervisor requests |
+| `sendTimeoutMs` | `8000` | Broker delivery-ack timeout for sends/asks |
+| `listTimeoutMs` | `5000` | Session-list response timeout |
 | `status` | — | Optional custom status suffix shown after the automatic lifecycle status, for example `thinking · researching` |
 
 For example, if you have Bun installed and want it to start the broker directly, use:

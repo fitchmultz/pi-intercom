@@ -91,7 +91,23 @@ function isSessionRegistration(value: unknown): value is Omit<SessionInfo, "id">
     return false;
   }
 
-  return session.status === undefined || typeof session.status === "string";
+  if (session.status !== undefined && typeof session.status !== "string") {
+    return false;
+  }
+
+  if (session.lastSeen !== undefined && typeof session.lastSeen !== "number") {
+    return false;
+  }
+
+  if (session.lastIntercomActivity !== undefined && typeof session.lastIntercomActivity !== "number") {
+    return false;
+  }
+
+  if (session.pendingAsks !== undefined && typeof session.pendingAsks !== "number") {
+    return false;
+  }
+
+  return session.acceptsAsks === undefined || typeof session.acceptsAsks === "boolean";
 }
 
 class IntercomBroker {
@@ -175,6 +191,10 @@ class IntercomBroker {
       throw new Error(`Received ${clientMessage.type} before register`);
     }
 
+    if (currentId !== null) {
+      this.touchActivity(currentId, false);
+    }
+
     switch (clientMessage.type) {
       case "register": {
         if (!isSessionRegistration(clientMessage.session)) {
@@ -187,7 +207,12 @@ class IntercomBroker {
         
         const id = randomUUID();
         setId(id);
-        const info: SessionInfo = { ...clientMessage.session, id };
+        const now = Date.now();
+        const info: SessionInfo = {
+          ...clientMessage.session,
+          id,
+          lastSeen: clientMessage.session.lastSeen ?? now,
+        };
         this.sessions.set(id, { socket, info });
         
         if (this.shutdownTimer) {
@@ -255,6 +280,8 @@ class IntercomBroker {
             });
             break;
           }
+          this.touchActivity(currentId, true);
+          this.touchActivity(targets[0].info.id, true);
           writeMessage(targets[0].socket, {
             type: "message",
             from: fromSession.info,
@@ -305,7 +332,27 @@ class IntercomBroker {
             }
             session.info.model = clientMessage.model;
           }
-          session.info.lastActivity = Date.now();
+          if (clientMessage.pendingAsks !== undefined) {
+            if (typeof clientMessage.pendingAsks !== "number" || !Number.isFinite(clientMessage.pendingAsks) || clientMessage.pendingAsks < 0) {
+              throw new Error("Invalid presence pendingAsks");
+            }
+            session.info.pendingAsks = clientMessage.pendingAsks;
+          }
+          if (clientMessage.acceptsAsks !== undefined) {
+            if (typeof clientMessage.acceptsAsks !== "boolean") {
+              throw new Error("Invalid presence acceptsAsks");
+            }
+            session.info.acceptsAsks = clientMessage.acceptsAsks;
+          }
+          if (clientMessage.lastIntercomActivity !== undefined) {
+            if (typeof clientMessage.lastIntercomActivity !== "number" || !Number.isFinite(clientMessage.lastIntercomActivity)) {
+              throw new Error("Invalid presence lastIntercomActivity");
+            }
+            session.info.lastIntercomActivity = clientMessage.lastIntercomActivity;
+          }
+          const now = Date.now();
+          session.info.lastActivity = now;
+          session.info.lastSeen = now;
           this.broadcast({ type: "presence_update", session: session.info }, currentId);
         }
         break;
@@ -313,6 +360,19 @@ class IntercomBroker {
 
       default:
         throw new Error(`Unknown client message type: ${clientMessage.type}`);
+    }
+  }
+
+  /** Update liveness/intercom-activity timestamps for a connected session. */
+  private touchActivity(sessionId: string, comms: boolean): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      return;
+    }
+    const now = Date.now();
+    session.info.lastSeen = now;
+    if (comms) {
+      session.info.lastIntercomActivity = now;
     }
   }
 

@@ -20,6 +20,15 @@ export interface IntercomConfig {
   
   /** Show reply hint in incoming messages (default: true) */
   replyHint: boolean;
+
+  /** How long `ask`/supervisor ask waits for a reply before giving up, in ms (default: 120000 = 2 minutes). */
+  askTimeoutMs: number;
+
+  /** How long the client waits for the broker to acknowledge message delivery, in ms (default: 8000). */
+  sendTimeoutMs: number;
+
+  /** How long the client waits for a session list response, in ms (default: 5000). */
+  listTimeoutMs: number;
 }
 
 const CONFIG_PATH = join(homedir(), ".pi/agent/intercom/config.json");
@@ -30,6 +39,9 @@ const defaults: IntercomConfig = {
   confirmSend: false,
   enabled: true,
   replyHint: true,
+  askTimeoutMs: 2 * 60 * 1000,
+  sendTimeoutMs: 8000,
+  listTimeoutMs: 5000,
 };
 
 export function loadConfig(): IntercomConfig {
@@ -98,6 +110,16 @@ export function loadConfig(): IntercomConfig {
         throw new Error(`"status" must be a string`);
       }
       config.status = parsedConfig.status;
+    }
+
+    for (const [key, min] of [["askTimeoutMs", 1000], ["sendTimeoutMs", 500], ["listTimeoutMs", 500]] as const) {
+      if (Object.hasOwn(parsedConfig, key)) {
+        const value = parsedConfig[key];
+        if (typeof value !== "number" || !Number.isFinite(value) || value < min) {
+          throw new Error(`"${key}" must be a finite number >= ${min}`);
+        }
+        config[key] = value;
+      }
     }
 
     return config;

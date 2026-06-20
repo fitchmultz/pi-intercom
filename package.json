@@ -32,15 +32,23 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.79.8 <1",
-    "@earendil-works/pi-tui": ">=0.79.8 <1"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
   },
   "dependencies": {
     "tsx": "^4.20.0",
-    "typebox": "^1.1.24"
+    "typebox": "^1.1.38"
   },
   "devDependencies": {
     "@types/node": "^25.9.3",
     "typescript": "^5.9.3"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    }
   }
 }

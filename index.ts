@@ -408,13 +408,30 @@ function buildPresenceIdentity(pi: ExtensionAPI, sessionId: string): { name: str
     name: subagentIntercomSessionName || resolveIntercomPresenceName(pi.getSessionName(), sessionId),
   };
 }
-function formatSessionListRow(session: SessionInfo, currentCwd: string, isSelf: boolean, duplicates = new Set<string>(), allSessions: SessionInfo[] = [session]): string {
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  return `${Math.floor(seconds / 3600)}h`;
+}
+function formatSessionListRow(session: SessionInfo, currentCwd: string, isSelf: boolean, duplicates = new Set<string>(), allSessions: SessionInfo[] = [session], now = Date.now()): string {
   const name = session.name || "Unnamed session";
   const duplicateName = Boolean(session.name && duplicates.has(session.name.toLowerCase()));
+  const healthTags: string[] = [];
+  healthTags.push(`accepts_asks:${session.acceptsAsks === undefined ? "unknown" : session.acceptsAsks ? "true" : "false"}`);
+  healthTags.push(`pending_asks:${typeof session.pendingAsks === "number" ? session.pendingAsks : "unknown"}`);
+  if (typeof session.lastIntercomActivity === "number" && session.lastIntercomActivity > 0) {
+    healthTags.push(`last_intercom_activity:${formatDuration(Math.max(0, Math.floor((now - session.lastIntercomActivity) / 1000)))} ago`);
+  } else {
+    healthTags.push("last_intercom_activity:none");
+  }
+  if (typeof session.lastSeen === "number") {
+    healthTags.push(`last_seen:${formatDuration(Math.max(0, Math.floor((now - session.lastSeen) / 1000)))} ago`);
+  }
   const tags = [
     isSelf ? "self" : session.cwd === currentCwd ? "same cwd" : undefined,
     session.status,
     duplicateName ? `target:${formatSessionTarget(session, allSessions)}` : undefined,
+    ...healthTags,
   ].filter((tag): tag is string => Boolean(tag));
   const target = formatSessionTarget(session, allSessions);
   const suffix = tags.length ? ` [${tags.join(", ")}]` : "";
@@ -474,8 +491,9 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   let runtimeStarted = false;
   let runtimeGeneration = 0;
   let agentRunning = false;
+  let lastIntercomActivity = 0;
   const activeTools = new Map<string, string>();
-  const replyTracker = new ReplyTracker();
+  const replyTracker = new ReplyTracker(config.askTimeoutMs);
   const pendingIdleMessages: InboundMessageEntry[] = [];
   let inboundFlushTimer: NodeJS.Timeout | null = null;
   let replyWaiter: {
@@ -493,8 +511,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
-        rejectReplyWaiter(new Error(`No reply from "${from}" within 10 minutes`));
-      }, 10 * 60 * 1000);
+        rejectReplyWaiter(new Error(`No reply from "${from}" within ${Math.max(1, Math.round(config.askTimeoutMs / 60000))} minute(s)`));
+      }, config.askTimeoutMs);
       const cleanup = () => {
         clearTimeout(timeout);
         signal?.removeEventListener("abort", onAbort);
@@ -587,27 +605,50 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
 
     const identity = buildPresenceIdentity(pi, currentSessionId);
+    const now = Date.now();
     return {
       name: identity.name,
       cwd: liveContext.cwd ?? process.cwd(),
       model: currentModel,
       pid: process.pid,
       startedAt: sessionStartedAt,
-      lastActivity: Date.now(),
+      lastActivity: now,
+      lastSeen: now,
       status: currentStatus(),
+      ...buildPresenceHealth(),
     };
+  }
+  function canAcceptAsks(): boolean {
+    const liveContext = getLiveContext();
+    if (!liveContext || agentRunning || activeTools.size > 0) return false;
+    try {
+      return liveContext.isIdle();
+    } catch {
+      return false;
+    }
+  }
+  /** Build peer-health fields published via presence so askers can detect idle/non-accepting peers. */
+  function buildPresenceHealth(): { pendingAsks: number; acceptsAsks: boolean; lastIntercomActivity: number } {
+    return {
+      pendingAsks: replyTracker.listPending().length,
+      acceptsAsks: canAcceptAsks(),
+      lastIntercomActivity,
+    };
+  }
+  function markIntercomActivity(): void {
+    lastIntercomActivity = Date.now();
   }
   function syncPresenceIdentity(sessionId: string): void {
     if (!client || !getLiveContext()) {
       return;
     }
-    client.updatePresence({ ...buildPresenceIdentity(pi, sessionId), status: currentStatus() });
+    client.updatePresence({ ...buildPresenceIdentity(pi, sessionId), status: currentStatus(), ...buildPresenceHealth() });
   }
   function syncPresenceStatus(): void {
     if (!client || !currentSessionId || !getLiveContext()) {
       return;
     }
-    client.updatePresence({ status: currentStatus() });
+    client.updatePresence({ status: currentStatus(), ...buildPresenceHealth() });
   }
   function currentSessionTargetMatches(to: string, resolvedTo?: string | null, activeClient?: IntercomClient): boolean {
     const targets = new Set<string>();
@@ -731,6 +772,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         || from.id === replyWaiter.from;
       const replyMatches = message.replyTo === replyWaiter.replyTo;
       if (fromMatches && replyMatches) {
+        markIntercomActivity();
+        syncPresenceStatus();
         replyWaiter.resolve(message);
         return;
       }
@@ -743,6 +786,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       ? `intercom({ action: "reply", message: "..." })`
       : undefined;
     replyTracker.recordIncomingMessage(from, message);
+    markIntercomActivity();
+    syncPresenceStatus();
     const entry = { from, message, replyCommand, bodyText };
     void (async () => {
       const activeContext = getLiveContext(liveContext, messageGeneration);
@@ -760,6 +805,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
               });
               if (result.delivered && getLiveContext(liveContext, messageGeneration)) {
                 replyTracker.markReplied(message.id);
+                markIntercomActivity();
+                syncPresenceStatus();
               }
             } catch {
               // Best-effort reply; keep the busy non-interactive session running either way.
@@ -850,7 +897,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     let nextReconnectPromise!: Promise<IntercomClient>;
     nextReconnectPromise = (async () => {
-      const nextClient = new IntercomClient();
+      const nextClient = new IntercomClient({ sendTimeoutMs: config.sendTimeoutMs, listTimeoutMs: config.listTimeoutMs });
       client = nextClient;
       attachClientHandlers(nextClient);
       try {
@@ -895,6 +942,20 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       throw new Error(`Target "${nameOrId}" is too short. Use the displayed target from intercom list, such as ${formatTargetOptions(resolution.matches, sessions)}.`);
     }
     return null;
+  }
+  /** Look up a connected peer's latest published health by session id. Returns null if unavailable. */
+  async function resolvePeerHealth(activeClient: IntercomClient, sessionId: string): Promise<SessionInfo | null> {
+    try {
+      const sessions = await activeClient.listSessions();
+      return sessions.find((session) => session.id === sessionId) ?? null;
+    } catch {
+      // If health cannot be resolved, callers keep the normal reply wait.
+      return null;
+    }
+  }
+  /** A peer is considered idle/not-accepting only when it explicitly publishes acceptsAsks === false. */
+  function peerDeclinesAsks(health: SessionInfo | null): boolean {
+    return health?.acceptsAsks === false;
   }
   function deliverLocalSubagentRelayMessage(sender: "subagent-control" | "subagent-result", status: string, messageText: string): void {
     const now = Date.now();
@@ -1033,6 +1094,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     currentModel = ctx.model?.id ?? "unknown";
     sessionStartedAt = Date.now();
     agentRunning = false;
+    lastIntercomActivity = 0;
     activeTools.clear();
     const startupGeneration = runtimeGeneration;
     startupConnectTimer = setTimeout(() => {
@@ -1283,6 +1345,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
                 details: { messageId: result.id, delivered: false, reason: result.reason },
               };
             }
+            markIntercomActivity();
+            syncPresenceStatus();
             pi.appendEntry("intercom_sent", {
               to: metadata.orchestratorTarget,
               message: { text: message, reason },
@@ -1340,8 +1404,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           });
           if (!sendResult.delivered) {
             const errorText = sendResult.reason ?? "Session may not exist or has disconnected.";
-            rejectReplyWaiter(new Error(`Message to "${metadata.orchestratorTarget}" was not delivered: ${errorText}`));
             if (replyPromise) {
+              rejectReplyWaiter(new Error(`Message to "${metadata.orchestratorTarget}" was not delivered: ${errorText}`));
               try {
                 await replyPromise;
               } catch {
@@ -1354,6 +1418,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
               details: { error: true },
             };
           }
+          markIntercomActivity();
+          syncPresenceStatus();
           pi.appendEntry("intercom_sent", {
             to: metadata.orchestratorTarget,
             message: {
@@ -1568,6 +1634,7 @@ Usage:
                 details: { messageId: result.id, delivered: false, reason: result.reason },
               };
             }
+            markIntercomActivity();
             pi.appendEntry("intercom_sent", {
               to,
               message: { text: message, attachments, replyTo },
@@ -1577,6 +1644,7 @@ Usage:
             if (replyTo) {
               replyTracker.markReplied(replyTo);
             }
+            syncPresenceStatus();
             const replyModeHint = replyTo ? "" : " (fire-and-forget; use `ask` when you need a reply)";
             return {
               content: [{ type: "text", text: `Message sent to ${to}${replyModeHint}` }],
@@ -1634,8 +1702,20 @@ Usage:
                 details: { error: true },
               };
             }
+            const peerHealth = await resolvePeerHealth(connectedClient, sendTo);
+            const peerIdle = peerDeclinesAsks(peerHealth);
+            if (_signal?.aborted) {
+              return {
+                content: [{ type: "text", text: "Cancelled" }],
+                isError: true,
+                details: { error: true },
+              };
+            }
             const questionId = randomUUID();
-            replyPromise = waitForReply(sendTo, questionId, _signal);
+            if (!peerIdle) {
+              replyPromise = waitForReply(sendTo, questionId, _signal);
+              replyPromise.catch(() => undefined);
+            }
             const sendResult = await connectedClient.send(sendTo, {
               messageId: questionId,
               text: message,
@@ -1646,8 +1726,8 @@ Usage:
 
             if (!sendResult.delivered) {
               const errorText = sendResult.reason ?? "Session may not exist or has disconnected.";
-              rejectReplyWaiter(new Error(`Message to "${to}" was not delivered: ${errorText}`));
               if (replyPromise) {
+                rejectReplyWaiter(new Error(`Message to "${to}" was not delivered: ${errorText}`));
                 try {
                   await replyPromise;
                 } catch {
@@ -1660,13 +1740,23 @@ Usage:
                 details: { error: true },
               };
             }
+            markIntercomActivity();
+            syncPresenceStatus();
             pi.appendEntry("intercom_sent", {
               to,
               message: { text: message, attachments, replyTo },
               messageId: sendResult.id,
               timestamp: Date.now(),
             });
-            const replyMessage = await replyPromise;
+            if (peerIdle) {
+              // Peer published acceptsAsks=false: deliver the ask so it is not lost, but do not wait for a reply.
+              return {
+                content: [{ type: "text", text: `Delivered ask to ${to}; peer reports it is not accepting asks right now (peer_idle).` }],
+                isError: false,
+                details: { messageId: sendResult.id, delivered: true, replied: false, reason: "peer_idle" },
+              };
+            }
+            const replyMessage = await replyPromise!;
             const replyText = replyMessage.content.text;
             const replyAttachments = replyMessage.content.attachments?.length
               ? formatAttachments(replyMessage.content.attachments)
@@ -1737,6 +1827,8 @@ Usage:
               };
             }
             replyTracker.markReplied(target.message.id);
+            markIntercomActivity();
+            syncPresenceStatus();
             pi.appendEntry("intercom_sent", {
               to: target.from.name || target.from.id,
               message: { text: message, replyTo: target.message.id },

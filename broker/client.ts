@@ -7,6 +7,18 @@ import type { SessionInfo, Message, Attachment } from "../types.js";
 
 const BROKER_SOCKET = getBrokerSocketPath();
 
+/** Default delivery-ack timeout for `send` (broker acknowledges quickly). */
+const DEFAULT_SEND_TIMEOUT_MS = 8000;
+/** Default timeout for `listSessions` responses. */
+const DEFAULT_LIST_TIMEOUT_MS = 5000;
+
+export interface IntercomClientOptions {
+  /** Timeout (ms) for the broker to acknowledge message delivery. */
+  sendTimeoutMs?: number;
+  /** Timeout (ms) for a session list response. */
+  listTimeoutMs?: number;
+}
+
 interface SendOptions {
   text: string;
   attachments?: Attachment[];
@@ -101,7 +113,23 @@ function isSessionInfo(value: unknown): value is SessionInfo {
     return false;
   }
 
-  return session.status === undefined || typeof session.status === "string";
+  if (session.status !== undefined && typeof session.status !== "string") {
+    return false;
+  }
+
+  if (session.lastSeen !== undefined && typeof session.lastSeen !== "number") {
+    return false;
+  }
+
+  if (session.lastIntercomActivity !== undefined && typeof session.lastIntercomActivity !== "number") {
+    return false;
+  }
+
+  if (session.pendingAsks !== undefined && typeof session.pendingAsks !== "number") {
+    return false;
+  }
+
+  return session.acceptsAsks === undefined || typeof session.acceptsAsks === "boolean";
 }
 
 export class IntercomClient extends EventEmitter {
@@ -111,6 +139,14 @@ export class IntercomClient extends EventEmitter {
   private pendingLists = new Map<string, { resolve: (sessions: SessionInfo[]) => void; reject: (e: Error) => void }>();
   private disconnecting = false;
   private disconnectError: Error | null = null;
+  private readonly sendTimeoutMs: number;
+  private readonly listTimeoutMs: number;
+
+  constructor(options: IntercomClientOptions = {}) {
+    super();
+    this.sendTimeoutMs = options.sendTimeoutMs ?? DEFAULT_SEND_TIMEOUT_MS;
+    this.listTimeoutMs = options.listTimeoutMs ?? DEFAULT_LIST_TIMEOUT_MS;
+  }
 
   private failPending(error: Error): void {
     for (const pending of this.pendingSends.values()) {
@@ -461,7 +497,7 @@ export class IntercomClient extends EventEmitter {
           this.pendingLists.delete(requestId);
           wrappedReject(new Error("List sessions timeout"));
         }
-      }, 5000);
+      }, this.listTimeoutMs);
       this.pendingLists.set(requestId, { resolve: wrappedResolve, reject: wrappedReject });
       try {
         writeMessage(socket, { type: "list", requestId });
@@ -507,7 +543,7 @@ export class IntercomClient extends EventEmitter {
           this.pendingSends.delete(messageId);
           wrappedReject(new Error("Send timeout"));
         }
-      }, 10000);
+      }, this.sendTimeoutMs);
       this.pendingSends.set(messageId, { resolve: wrappedResolve, reject: wrappedReject });
 
       try {
@@ -520,7 +556,7 @@ export class IntercomClient extends EventEmitter {
     });
   }
 
-  updatePresence(updates: { name?: string; status?: string; model?: string }): void {
+  updatePresence(updates: { name?: string; status?: string; model?: string; pendingAsks?: number; acceptsAsks?: boolean; lastIntercomActivity?: number }): void {
     if (this.disconnecting) {
       return;
     }

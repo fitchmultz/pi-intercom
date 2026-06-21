@@ -1,6 +1,6 @@
 ---
 name: pi-intercom
-description: "Use this skill when coordinating local pi sessions with pi-intercom: list peers, send passive updates, ask blocking questions, reply to inbound asks, or handle pi-subagents supervisor escalations. Do not use for generic chat, remote or cross-machine messaging, unrelated repos, trivial questions, or work the current session can finish alone."
+description: "Use this skill when coordinating local Pi sessions with pi-intercom: list peers, send passive updates, ask blocking questions, reply to inbound asks, use contact_supervisor, or handle pi-subagents supervisor escalations. Do not use for generic chat, remote or cross-machine messaging, unrelated repos, routine subagent completion, trivial questions, or work the current session can finish alone."
 ---
 
 # Pi Intercom
@@ -115,7 +115,9 @@ intercom({
 
 ## Supervisor escalations from pi-subagents
 
-When a delegated child can reach the orchestrator, `pi-subagents` may provide a child-only `contact_supervisor` tool. Normal sessions use `intercom`; do not assume `contact_supervisor` exists unless the tool is present.
+When a delegated child can reach the orchestrator, `pi-subagents` may provide a child-only `contact_supervisor` tool. Use it from the child when it is present; normal sessions use `intercom`. Do not assume `contact_supervisor` exists unless the tool is present.
+
+Child-side rule: use `contact_supervisor` for `need_decision`, `interview_request`, or meaningful `progress_update`. Do not use it for routine completion; return final results through `pi-subagents`.
 
 If you are the supervisor and receive a formatted message from a subagent, answer with `reply`:
 

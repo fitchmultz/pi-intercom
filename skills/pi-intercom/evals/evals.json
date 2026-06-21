@@ -11,6 +11,11 @@
       "expected_output": "Uses intercom reply, not a fresh send, and answers with JSON containing responses for api and constraints while omitting any info-only question ids."
     },
     {
+      "id": "success-child-contact-supervisor-decision",
+      "prompt": "You are a delegated child with a contact_supervisor tool. Ask the supervisor whether to target the stable or experimental API before continuing.",
+      "expected_output": "Uses contact_supervisor with reason need_decision instead of raw intercom, includes the blocking API choice, waits for the reply, and does not use contact_supervisor for routine completion."
+    },
+    {
       "id": "edge-no-peer-connected",
       "prompt": "Send findings to worker, but intercom list shows no other sessions connected.",
       "expected_output": "Does not invent a target or claim delivery. Reports that no intercom-connected peer is available, optionally follows the visible-peer reference only if a long-lived visible session is justified, and otherwise continues local safe work."

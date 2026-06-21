@@ -20,6 +20,11 @@
     "reason": "Supervisor escalation handling is in scope."
   },
   {
+    "query": "Use contact_supervisor to ask the orchestrator which API the child should target.",
+    "should_trigger": true,
+    "reason": "Child-side contact_supervisor usage is part of pi-intercom supervisor escalation workflow."
+  },
+  {
     "query": "What communication skills should I put on my resume?",
     "should_trigger": false,
     "reason": "Human career skills are unrelated to the pi-intercom tool workflow."

@@ -4,9 +4,17 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-06-22
+
+### Changed
+- updated the local pi development baseline to `@earendil-works/pi-coding-agent` / `@earendil-works/pi-tui` `0.79.10`
+
 ### Fixed
 - Default broker startup now launches the package-local `tsx` CLI through the current Node executable instead of relying on `npx`, avoiding shell/shim failures in isolated Pi homes.
 - macOS/Linux broker sockets now use a short temp path to avoid Unix socket path length failures in deep temporary homes.
+
+### Validation
+- ran `npm test`, `npm run typecheck`, and an isolated Pi package-load smoke under pi `0.79.10`
 
 ## [0.6.0] - 2026-05-03
 

@@ -38,11 +38,12 @@ Run that from this local fork checkout, then restart Pi in the project. The exte
 
 ```bash
 npm run typecheck
+npm run smoke:package
 npm test
 npm run smoke:real-pi
 ```
 
-`typecheck` validates the extension against the current `@earendil-works` Pi runtime packages. `smoke:real-pi` installs this checkout into an isolated temporary Pi home and verifies the package shows up in `pi list`. For live model-backed status/list checks, run:
+`typecheck` validates the extension against the current `@earendil-works` Pi runtime packages. `smoke:package` checks the local package shape without publishing. `smoke:real-pi` installs this checkout into an isolated temporary Pi home and verifies the package shows up in `pi list`. For live model-backed status/list checks, run:
 
 ```bash
 PI_REAL_SMOKE_MODEL=openai/gpt-4o-mini npm run smoke:real-pi -- --llm
@@ -66,7 +67,7 @@ Coordinate with other local pi sessions on related codebases. Use `/skill:pi-int
 
 A session becomes intercom-connected when all of these are true:
 - the `pi-intercom` extension is installed and loaded in that session
-- `enabled` is not set to `false` in `~/.pi/agent/intercom/config.json`
+- `enabled` is not set to `false` in `${PI_CODING_AGENT_DIR:-~/.pi/agent}/intercom/config.json`
 - the session has started or reloaded after the extension was installed
 - the local broker is running or can be auto-started
 
@@ -380,7 +381,7 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 
 ## Config
 
-Create `~/.pi/agent/intercom/config.json`:
+Create `${PI_CODING_AGENT_DIR:-~/.pi/agent}/intercom/config.json`:
 
 ```json
 {
@@ -452,10 +453,10 @@ Messages use length-prefixed JSON over a local socket/pipe transport (4-byte len
 Async extension work (startup, inbound flushes, reconnects, overlays, and relays) no-ops if the session shuts down or reloads before it settles.
 
 Runtime files:
-- Unix domain socket — short temp path named `pi-intercom-<hash>.sock` on macOS/Linux; Windows uses a named pipe instead
-- `~/.pi/agent/intercom/broker-launch.vbs` — Windows helper script used to launch the broker without a console window
-- `~/.pi/agent/intercom/broker.pid` — Broker process ID
-- `~/.pi/agent/intercom/config.json` — User configuration
+- Unix domain socket — short temp path named `pi-intercom-<hash>.sock` on macOS/Linux, keyed by `PI_CODING_AGENT_DIR` or `~/.pi/agent`; Windows uses a named pipe instead
+- `${PI_CODING_AGENT_DIR:-~/.pi/agent}/intercom/broker-launch.vbs` — Windows helper script used to launch the broker without a console window
+- `${PI_CODING_AGENT_DIR:-~/.pi/agent}/intercom/broker.pid` — Broker process ID
+- `${PI_CODING_AGENT_DIR:-~/.pi/agent}/intercom/config.json` — User configuration
 
 ## Design Decisions
 

@@ -100,7 +100,8 @@ export class SessionListOverlay implements Component {
   }
 
   render(width: number): string[] {
-    const innerWidth = Math.max(36, Math.min(width - 2, 88));
+    if (width < 3) return [truncateToWidth("Intercom", width)];
+    const innerWidth = Math.min(width, 88);
     const contentWidth = Math.max(1, innerWidth - 2);
     const footer = this.sessions.length === 0
       ? `${this.keybindings.getKeys("tui.select.cancel").join("/")}: Close`

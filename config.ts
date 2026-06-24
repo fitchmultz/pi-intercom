@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
-import { homedir } from "os";
+import { getPiAgentDir } from "./agent-dir.js";
 
 export interface IntercomConfig {
   /** Broker command used to spawn the broker process (e.g. "npx" or "bun") */
@@ -31,7 +31,9 @@ export interface IntercomConfig {
   listTimeoutMs: number;
 }
 
-const CONFIG_PATH = join(homedir(), ".pi/agent/intercom/config.json");
+function getConfigPath(): string {
+  return join(getPiAgentDir(), "intercom", "config.json");
+}
 
 const defaults: IntercomConfig = {
   brokerCommand: "npx",
@@ -45,12 +47,13 @@ const defaults: IntercomConfig = {
 };
 
 export function loadConfig(): IntercomConfig {
-  if (!existsSync(CONFIG_PATH)) {
+  const configPath = getConfigPath();
+  if (!existsSync(configPath)) {
     return { ...defaults };
   }
   
   try {
-    const raw = readFileSync(CONFIG_PATH, "utf-8");
+    const raw = readFileSync(configPath, "utf-8");
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
       throw new Error("Config must be a JSON object");
@@ -124,7 +127,7 @@ export function loadConfig(): IntercomConfig {
 
     return config;
   } catch (error) {
-    console.error(`Failed to load intercom config at ${CONFIG_PATH}:`, error);
+    console.error(`Failed to load intercom config at ${configPath}:`, error);
     return { ...defaults };
   }
 }

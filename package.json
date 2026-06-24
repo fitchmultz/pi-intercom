@@ -6,6 +6,7 @@
   "main": "index.ts",
   "files": [
     "index.ts",
+    "agent-dir.ts",
     "types.ts",
     "config.ts",
     "reply-tracker.ts",
@@ -18,7 +19,9 @@
   "scripts": {
     "test": "tsx --test broker/paths.test.ts broker/spawn.test.ts session-targets.test.ts reply-tracker.test.ts intercom.integration.test.ts test/inline-message.test.ts",
     "typecheck": "tsc --noEmit",
-    "smoke:real-pi": "node scripts/real-pi-smoke.mjs"
+    "smoke:package": "node scripts/package-smoke.mjs",
+    "smoke:real-pi": "node scripts/real-pi-smoke.mjs",
+    "ci": "npm run typecheck && npm run smoke:package && npm test && npm run smoke:real-pi"
   },
   "keywords": [
     "pi-package"
@@ -32,6 +35,7 @@
     ]
   },
   "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
@@ -40,6 +44,7 @@
     "tsx": "^4.20.0"
   },
   "devDependencies": {
+    "@earendil-works/pi-ai": "^0.80.1",
     "@earendil-works/pi-coding-agent": "^0.80.1",
     "@earendil-works/pi-tui": "^0.80.1",
     "@types/node": "^25.9.3",
@@ -47,6 +52,9 @@
     "typebox": "^1.1.38"
   },
   "peerDependenciesMeta": {
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
     "@earendil-works/pi-coding-agent": {
       "optional": true
     },

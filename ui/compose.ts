@@ -169,7 +169,8 @@ export class ComposeOverlay implements Component {
   }
 
   render(width: number): string[] {
-    const innerWidth = Math.max(24, Math.min(width - 2, 72));
+    if (width < 3) return [truncateToWidth("Intercom", width)];
+    const innerWidth = Math.min(width, 72);
     const contentWidth = Math.max(1, innerWidth - 2);
     const footer = `${this.keybindings.getKeys("tui.select.confirm").join("/")}: ${this.mode === "ask" ? "Ask" : "Send"} • Tab: ${this.mode === "ask" ? "Send mode" : "Ask mode"} • ${this.keybindings.getKeys("tui.select.cancel").join("/")}: Close`;
     const border = (text: string) => this.theme.fg("accent", text);

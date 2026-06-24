@@ -1,6 +1,7 @@
 import { createHash } from "crypto";
 import { join } from "path";
-import { homedir, tmpdir } from "os";
+import { tmpdir } from "os";
+import { getPiAgentDir } from "../agent-dir.js";
 
 function sanitizePipeSegment(value: string): string {
   return value
@@ -11,12 +12,12 @@ function sanitizePipeSegment(value: string): string {
 
 export function getBrokerSocketPath(
   platform: NodeJS.Platform = process.platform,
-  homeDir: string = homedir(),
+  agentDir: string = getPiAgentDir(),
 ): string {
   if (platform === "win32") {
-    return `\\\\.\\pipe\\pi-intercom-${sanitizePipeSegment(homeDir)}`;
+    return `\\\\.\\pipe\\pi-intercom-${sanitizePipeSegment(agentDir)}`;
   }
 
-  const digest = createHash("sha256").update(homeDir).digest("hex").slice(0, 16);
+  const digest = createHash("sha256").update(agentDir).digest("hex").slice(0, 16);
   return join(tmpdir(), `pi-intercom-${digest}.sock`);
 }

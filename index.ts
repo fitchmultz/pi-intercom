@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { randomUUID } from "crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import { IntercomClient } from "./broker/client.ts";
@@ -467,6 +468,23 @@ function pendingAskPreview(message: Message): string {
 }
 function firstTextContent(result: { content?: Array<{ type: string; text?: string }> }): string {
   return result.content?.find((item) => item.type === "text" && typeof item.text === "string")?.text?.replace(/\*\*/g, "") ?? "";
+}
+
+interface ToolResultLike {
+  content?: Array<{ type: string; text?: string }>;
+  isError?: boolean;
+  details?: Record<string, unknown>;
+}
+
+class ToolExecutionFailure extends Error {
+  constructor(message: string, readonly details?: Record<string, unknown>) {
+    super(message);
+  }
+}
+
+function throwIfToolError<T extends ToolResultLike>(result: T): T {
+  if (!result.isError) return result;
+  throw new ToolExecutionFailure(firstTextContent(result) || "Tool failed", result.details);
 }
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
@@ -1063,21 +1081,23 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       }
     })();
   }
-  pi.events.on(SUBAGENT_CONTROL_INTERCOM_EVENT, (payload) => {
-    relaySubagentIntercomPayload(payload, {
-      sender: "subagent-control",
-      status: "needs_attention",
-      errorEntryType: "intercom_control_error",
-    });
-  });
-  pi.events.on(SUBAGENT_RESULT_INTERCOM_EVENT, (payload) => {
-    relaySubagentIntercomPayload(payload, {
-      sender: "subagent-result",
-      status: "result",
-      errorEntryType: "intercom_result_error",
-      acknowledge: true,
-    });
-  });
+  const eventUnsubscribes = [
+    pi.events.on(SUBAGENT_CONTROL_INTERCOM_EVENT, (payload) => {
+      relaySubagentIntercomPayload(payload, {
+        sender: "subagent-control",
+        status: "needs_attention",
+        errorEntryType: "intercom_control_error",
+      });
+    }),
+    pi.events.on(SUBAGENT_RESULT_INTERCOM_EVENT, (payload) => {
+      relaySubagentIntercomPayload(payload, {
+        sender: "subagent-result",
+        status: "result",
+        errorEntryType: "intercom_result_error",
+        acknowledge: true,
+      });
+    }),
+  ];
   pi.on("session_start", (_event, ctx) => {
     if (!config.enabled) {
       return;
@@ -1113,6 +1133,13 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   });
   
   pi.on("session_shutdown", async () => {
+    for (const unsubscribe of eventUnsubscribes) {
+      try {
+        unsubscribe();
+      } catch {
+        // Best effort cleanup for reload/session replacement.
+      }
+    }
     shuttingDown = true;
     disposed = true;
     runtimeGeneration += 1;
@@ -1237,8 +1264,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         "Do not use contact_supervisor for routine completion handoffs; return the final subagent result normally.",
       ],
       parameters: Type.Object({
-        reason: Type.String({
-          enum: ["need_decision", "progress_update", "interview_request"],
+        reason: StringEnum(["need_decision", "progress_update", "interview_request"] as const, {
           description: "Contact reason: 'need_decision' waits for a reply; 'interview_request' sends structured questions and waits for a reply; 'progress_update' sends a non-blocking update",
         }),
         message: Type.Optional(Type.String({
@@ -1249,7 +1275,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           description: Type.Optional(Type.String()),
           questions: Type.Array(Type.Object({
             id: Type.String(),
-            type: Type.String({ description: "Question type: single, multi, text, image, or info" }),
+            type: StringEnum(["single", "multi", "text", "image", "info"] as const, { description: "Question type: single, multi, text, image, or info" }),
             question: Type.String(),
             options: Type.Optional(Type.Array(Type.Any())),
             context: Type.Optional(Type.String()),
@@ -1257,6 +1283,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         }, { description: "Structured interview request for reason='interview_request'" })),
       }),
       async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+        return throwIfToolError(await (async () => {
         const reason = params.reason as ContactSupervisorReason;
         if (reason !== "need_decision" && reason !== "progress_update" && reason !== "interview_request") {
           return {
@@ -1466,6 +1493,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
             details: { error: true },
           };
         }
+        })());
       },
       renderCall(args, theme) {
         const reason = typeof args.reason === "string" ? args.reason : "contact";
@@ -1520,7 +1548,7 @@ Usage:
       "Use to coordinate with other local pi sessions: list peers, send updates, ask for help, or check intercom connectivity.",
 
     parameters: Type.Object({
-      action: Type.String({
+      action: StringEnum(["list", "send", "ask", "reply", "pending", "status"] as const, {
         description: "Action: 'list', 'send', 'ask', 'reply', 'pending', or 'status'",
       }),
       to: Type.Optional(Type.String({
@@ -1530,7 +1558,7 @@ Usage:
         description: "Message to send (for 'send', 'ask', or 'reply' action)",
       })),
       attachments: Type.Optional(Type.Array(Type.Object({
-        type: Type.Union([Type.Literal("file"), Type.Literal("snippet"), Type.Literal("context")]),
+        type: StringEnum(["file", "snippet", "context"] as const),
         name: Type.String(),
         content: Type.String(),
         language: Type.Optional(Type.String()),
@@ -1541,6 +1569,7 @@ Usage:
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      return throwIfToolError(await (async () => {
       let connectedClient: IntercomClient;
       try {
         connectedClient = await ensureConnected("tool");
@@ -1898,6 +1927,7 @@ Usage:
             details: { error: true },
           };
       }
+      })());
     },
     renderCall(args, theme) {
       const action = typeof args.action === "string" ? args.action : "intercom";

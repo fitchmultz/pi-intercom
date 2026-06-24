@@ -1,10 +1,12 @@
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { EventEmitter, once } from "node:events";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
+import net from "node:net";
 import type { Readable } from "node:stream";
 import { ReplyTracker } from "./reply-tracker.ts";
 import { ComposeOverlay } from "./ui/compose.ts";
@@ -19,8 +21,10 @@ const childEnvKeys = [
   "PI_SUBAGENT_INTERCOM_SESSION_NAME",
 ] as const;
 const sharedHomeDir = mkdtempSync(path.join(tmpdir(), "pic-"));
+const sharedAgentDir = path.join(sharedHomeDir, "pi-agent");
 const previousHome = process.env.HOME;
 const previousUserProfile = process.env.USERPROFILE;
+const previousPiAgentDir = process.env.PI_CODING_AGENT_DIR;
 const previousChildEnv = new Map<string, string | undefined>();
 for (const key of childEnvKeys) {
   previousChildEnv.set(key, process.env[key]);
@@ -28,10 +32,16 @@ for (const key of childEnvKeys) {
 }
 process.env.HOME = sharedHomeDir;
 process.env.USERPROFILE = sharedHomeDir;
+process.env.PI_CODING_AGENT_DIR = sharedAgentDir;
 const { IntercomClient } = await import("./broker/client.ts");
+const { getBrokerSocketPath } = await import("./broker/paths.ts");
 process.on("exit", () => {
+  for (const broker of activeBrokers) signalBroker(broker, "SIGKILL");
+  signalSharedBroker("SIGKILL");
   process.env.HOME = previousHome;
   process.env.USERPROFILE = previousUserProfile;
+  if (previousPiAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = previousPiAgentDir;
   for (const key of childEnvKeys) {
     const value = previousChildEnv.get(key);
     if (value === undefined) delete process.env[key];
@@ -41,9 +51,99 @@ process.on("exit", () => {
 });
 
 type BrokerProcess = ChildProcessByStdio<null, Readable, Readable>;
+const activeBrokers = new Set<BrokerProcess>();
+
+function signalBroker(broker: BrokerProcess, signal: NodeJS.Signals): void {
+  if (broker.pid && process.platform !== "win32") {
+    try {
+      process.kill(-broker.pid, signal);
+      return;
+    } catch {
+      // Fall back to the direct child below.
+    }
+  }
+  broker.kill(signal);
+}
+
+process.on("exit", () => {
+  for (const broker of activeBrokers) signalBroker(broker, "SIGKILL");
+  signalSharedBroker("SIGKILL");
+});
+
+after(async () => {
+  await Promise.all([...activeBrokers].map(stopBroker));
+  await stopSharedBroker();
+});
+
+function sharedBrokerPid(): number | null {
+  const pidPath = path.join(sharedAgentDir, "intercom", "broker.pid");
+  if (!existsSync(pidPath)) return null;
+  const pid = Number.parseInt(readFileSync(pidPath, "utf-8").trim(), 10);
+  return Number.isFinite(pid) ? pid : null;
+}
+
+function signalSharedBroker(signal: NodeJS.Signals): void {
+  const pid = sharedBrokerPid();
+  if (pid === null) return;
+  try {
+    process.kill(pid, signal);
+  } catch {
+    // Already gone.
+  }
+}
+
+async function stopSharedBroker(): Promise<void> {
+  const pid = sharedBrokerPid();
+  if (pid === null) return;
+  signalSharedBroker("SIGTERM");
+  const start = Date.now();
+  while (Date.now() - start < 2000) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  signalSharedBroker("SIGKILL");
+}
+
+function unrefStream(stream: Readable): void {
+  (stream as Readable & { unref?: () => void }).unref?.();
+}
+
+function detachBrokerFromTestRunner(broker: BrokerProcess): void {
+  unrefStream(broker.stdout);
+  unrefStream(broker.stderr);
+  broker.unref();
+}
+
+function brokerSocketConnectable(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.connect(getBrokerSocketPath());
+    const timeout = setTimeout(() => finish(false), 1000);
+    const finish = (connected: boolean) => {
+      clearTimeout(timeout);
+      socket.off("connect", onConnect);
+      socket.off("error", onError);
+      socket.destroy();
+      resolve(connected);
+    };
+    const onConnect = () => finish(true);
+    const onError = () => finish(false);
+    socket.once("connect", onConnect);
+    socket.once("error", onError);
+  });
+}
 
 async function waitForBrokerReady(broker: BrokerProcess): Promise<void> {
-  const ready = new Promise<void>((resolve, reject) => {
+  await new Promise<void>((resolve, reject) => {
+    const poll = setInterval(async () => {
+      if (await brokerSocketConnectable()) {
+        cleanup();
+        resolve();
+      }
+    }, 50);
     const timeout = setTimeout(() => {
       cleanup();
       reject(new Error("Broker startup timed out"));
@@ -59,6 +159,7 @@ async function waitForBrokerReady(broker: BrokerProcess): Promise<void> {
       reject(new Error(`Broker exited before startup (code=${code}, signal=${signal})`));
     };
     const cleanup = () => {
+      clearInterval(poll);
       clearTimeout(timeout);
       broker.stdout.off("data", onStdout);
       broker.off("exit", onExit);
@@ -67,8 +168,6 @@ async function waitForBrokerReady(broker: BrokerProcess): Promise<void> {
     broker.stdout.on("data", onStdout);
     broker.once("exit", onExit);
   });
-
-  await ready;
 }
 
 async function withChildOrchestratorEnv<T>(metadata: {
@@ -141,6 +240,7 @@ function createExtensionHarness(sessionName = "child-worker", options: {
   hasUI?: boolean;
   isIdle?: () => boolean;
   ui?: unknown;
+  wrapToolErrors?: boolean;
 } = {}) {
   const events = new EventEmitter();
   const lifecycleHandlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
@@ -164,7 +264,27 @@ function createExtensionHarness(sessionName = "child-worker", options: {
     },
     registerMessageRenderer: () => undefined,
     registerTool: (tool: CapturedTool) => {
-      tools.push(tool);
+      if (options.wrapToolErrors === false) {
+        tools.push(tool);
+        return;
+      }
+      const originalExecute = tool.execute.bind(tool);
+      tools.push({
+        ...tool,
+        async execute(...args) {
+          try {
+            return await originalExecute(...args);
+          } catch (error) {
+            return {
+              content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+              isError: true,
+              details: typeof error === "object" && error !== null && "details" in error
+                ? (error as { details?: Record<string, unknown> }).details
+                : undefined,
+            };
+          }
+        },
+      });
     },
     registerCommand: (name: string, command: { handler: (args: string, ctx: unknown) => unknown }) => {
       commands.set(name, command.handler);
@@ -200,18 +320,42 @@ function createExtensionHarness(sessionName = "child-worker", options: {
 }
 
 async function setupBroker() {
-  const broker = spawn(process.execPath, [path.join(repoDir, "node_modules", "tsx", "dist", "cli.mjs"), path.join(repoDir, "broker", "broker.ts")], {
+  const tsxDist = path.join(repoDir, "node_modules", "tsx", "dist");
+  const broker = spawn(process.execPath, [
+    "--require",
+    path.join(tsxDist, "preflight.cjs"),
+    "--import",
+    pathToFileURL(path.join(tsxDist, "loader.mjs")).href,
+    path.join(repoDir, "broker", "broker.ts"),
+  ], {
     cwd: repoDir,
-    env: { ...process.env, HOME: sharedHomeDir, USERPROFILE: sharedHomeDir },
+    detached: process.platform !== "win32",
+    env: { ...process.env, HOME: sharedHomeDir, USERPROFILE: sharedHomeDir, PI_CODING_AGENT_DIR: sharedAgentDir },
     stdio: ["ignore", "pipe", "pipe"],
   });
-  await waitForBrokerReady(broker);
-  return broker;
+  activeBrokers.add(broker);
+  try {
+    await waitForBrokerReady(broker);
+    detachBrokerFromTestRunner(broker);
+    return broker;
+  } catch (error) {
+    activeBrokers.delete(broker);
+    signalBroker(broker, "SIGKILL");
+    throw error;
+  }
 }
 
 async function stopBroker(broker: BrokerProcess): Promise<void> {
-  broker.kill("SIGTERM");
-  await once(broker, "exit").catch(() => undefined);
+  activeBrokers.delete(broker);
+  if (broker.exitCode !== null || broker.signalCode !== null) return;
+  signalBroker(broker, "SIGTERM");
+  await Promise.race([
+    once(broker, "exit").catch(() => undefined),
+    new Promise<void>((resolve) => setTimeout(() => {
+      signalBroker(broker, "SIGKILL");
+      resolve();
+    }, 2000)),
+  ]);
 }
 
 async function setupClients() {
@@ -1452,6 +1596,25 @@ test("child supervisor tool resolves target and includes run metadata", { concur
   } finally {
     await cleanup();
   }
+});
+
+test("child supervisor tool throws for execution errors so Pi marks failures", async () => {
+  await withChildOrchestratorEnv({
+    orchestratorTarget: "orchestrator",
+    runId: "run-error-semantics",
+    agent: "worker",
+    index: "0",
+  }, async () => {
+    const harness = createExtensionHarness("child-error-semantics", { wrapToolErrors: false });
+    const { default: piIntercomExtension } = await import(`./index.ts?error-semantics=${Date.now()}`);
+    piIntercomExtension(harness.pi as never);
+    const supervisorTool = harness.tools.find((tool) => tool.name === "contact_supervisor")!;
+
+    await assert.rejects(
+      supervisorTool.execute("invalid-raw", { reason: "done", message: "Finished." }, new AbortController().signal, undefined, harness.ctx),
+      /Invalid reason/,
+    );
+  });
 });
 
 test("child supervisor tool rejects invalid reasons and interview payloads", async () => {

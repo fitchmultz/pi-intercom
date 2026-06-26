@@ -24,6 +24,7 @@ const INTERCOM_DETACH_RESPONSE_EVENT = "pi-intercom:detach-response";
 const INTERCOM_DETACH_RESPONSE_TIMEOUT_MS = 500;
 const INBOUND_FLUSH_DELAY_MS = 200;
 const INBOUND_IDLE_RETRY_MS = 500;
+const NON_UI_REPLACE_FLUSH_DELAY_MS = 1_600;
 const SUBAGENT_PROGRESS_UPDATE_MAX_AGE_MS = 60_000;
 const DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX = "subagent-chat";
 const RECIPIENT_TURN_FAILED_PREFIX = "Recipient turn failed:";
@@ -51,7 +52,7 @@ interface InboundMessageEntry {
 }
 
 interface PendingInboundMessage extends InboundMessageEntry {
-  flushDelivery: "auto" | "passive";
+  flushDelivery: "auto" | "passive" | "steer";
 }
 
 type RequestedDelivery = MessageDelivery | "auto";
@@ -787,6 +788,23 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
 
     if (!isRecipientIdle(ctx)) {
+      if (!ctx.hasUI && pendingIdleMessages.some((entry) => entry.flushDelivery === "steer")) {
+        if (activeTools.size > 0) {
+          scheduleInboundFlush(INBOUND_IDLE_RETRY_MS);
+          return;
+        }
+        const now = Date.now();
+        const entries = pendingIdleMessages.splice(0, pendingIdleMessages.length);
+        for (const entry of entries) {
+          if (entry.flushDelivery === "steer") {
+            if (!isStaleSubagentProgressUpdate(entry, now)) sendIncomingMessage(entry, "trigger", generation);
+          } else {
+            pendingIdleMessages.push(entry);
+          }
+        }
+        if (pendingIdleMessages.length > 0) scheduleInboundFlush(INBOUND_IDLE_RETRY_MS);
+        return;
+      }
       scheduleInboundFlush(INBOUND_IDLE_RETRY_MS);
       return;
     }
@@ -802,10 +820,14 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         sendIncomingMessage(entry, "passive");
         return;
       }
+      if (entry.flushDelivery === "steer") {
+        sendIncomingMessage(entry, "steer", generation);
+        return;
+      }
       sendIncomingMessage(entry, index === triggerIndex ? "trigger" : "followUp");
     });
   }
-  function queueIdleMessage(entry: InboundMessageEntry, flushDelivery: PendingInboundMessage["flushDelivery"] = "auto"): void {
+  function queueIdleMessage(entry: InboundMessageEntry, flushDelivery: PendingInboundMessage["flushDelivery"] = "auto", delayMs = INBOUND_FLUSH_DELAY_MS): void {
     let replacedPendingAsk = false;
     if (entry.message.queueMode === "replace" && entry.message.threadId) {
       for (let index = pendingIdleMessages.length - 1; index >= 0; index -= 1) {
@@ -823,7 +845,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       syncPresenceStatus();
     }
     pendingIdleMessages.push({ ...entry, flushDelivery });
-    scheduleInboundFlush();
+    scheduleInboundFlush(delayMs);
   }
   function handleIncomingMessage(ctx: ExtensionContext, from: SessionInfo, message: Message): void {
     const messageGeneration = runtimeGeneration;
@@ -861,6 +883,10 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       }
       const delivery = requestedDelivery(message);
       if (delivery === "queue" && message.queueMode === "replace") {
+        if (!isRecipientIdle(activeContext) && !activeContext.hasUI) {
+          queueIdleMessage(entry, "steer", NON_UI_REPLACE_FLUSH_DELAY_MS);
+          return;
+        }
         queueIdleMessage(entry, "auto");
         return;
       }
@@ -878,8 +904,12 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           return;
         }
         if (!activeContext.hasUI) {
+          if (!message.expectsReply) {
+            sendIncomingMessage(entry, "steer", messageGeneration);
+            return;
+          }
           const activeClient = client;
-          if (message.expectsReply && !message.replyTo && activeClient?.isConnected()) {
+          if (!message.replyTo && activeClient?.isConnected()) {
             try {
               const result = await activeClient.send(from.id, {
                 text: "This agent is running in non-interactive mode and cannot respond to intercom messages while it is working. It will continue its current task and exit when done.",
@@ -1286,6 +1316,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     activeTools.delete(event.toolCallId);
     syncPresenceStatus();
+    flushIdleMessages();
   });
   pi.on("agent_end", () => {
     if (!getLiveContext()) {
@@ -1828,7 +1859,7 @@ Usage:
                   ? " (steers active recipient after the current tool call)"
                   : deliveryMode === "queue"
                     ? " (queued for active recipient; use `ask` when you need a reply)"
-                    : " (wakes recipient; use `ask` when you need a reply)";
+                    : " (accepted; wakes idle recipients; active recipients may see it after the current tool call or when idle; use ask+delivery:'steer' when you need a live reply)";
             return {
               content: [{ type: "text", text: `Message sent to ${to}${replyModeHint}` }],
               isError: false,

@@ -24,7 +24,7 @@ Pi-intercom also integrates well with [pi-subagents](https://github.com/nicobail
 
 ## In One Minute
 
-Each pi session that has `pi-intercom` loaded and enabled connects to a tiny local broker over a local IPC transport. The broker keeps track of connected sessions and routes direct messages to the one you target by name or session ID. The extension gives you both a tool (`intercom`) and a small overlay UI (`/intercom` or `Alt+M`). Incoming `send` and `ask` messages wake the recipient model by default; passive delivery is an explicit, discouraged opt-in for human-visible breadcrumbs only.
+Each pi session that has `pi-intercom` loaded and enabled connects to a tiny local broker over a local IPC transport. The broker keeps track of connected sessions and routes direct messages to the one you target by name or session ID. The extension gives you both a tool (`intercom`) and a small overlay UI (`/intercom` or `Alt+M`). Incoming messages wake idle recipients by default; active recipients see messages after the current tool call, when idle, or through explicit queue/steer delivery, and passive delivery is a discouraged opt-in for human-visible breadcrumbs only.
 
 ## Install
 
@@ -225,7 +225,7 @@ This matters because the agent receiving the message doesn't need to reconstruct
 
 ### `send` vs `ask`
 
-`send` is non-blocking — the tool returns after the broker accepts the message for delivery and does not return any later response. It wakes the recipient model by default, so use it for notifications, progress, and context drops that the agent should see now. Use `ask` for acknowledgements, decisions, or anything where the sender needs the answer in the same workflow. `send` supports `delivery:"queue"` for active-recipient follow-up, `delivery:"steer"` for urgent course correction, and passive delivery for human-visible breadcrumbs only; avoid passive delivery for agent-to-agent coordination. If you want an approval dialog before non-reply sends, set `confirmSend: true` in config. Replies that include `replyTo` still skip confirmation so reply-hint flows can continue without an extra approval step.
+`send` is non-blocking — the tool returns after the broker accepts the message for delivery and does not return any later response. It wakes idle recipients by default; active recipients may see the message after the current tool call or when idle. Use `ask` with `delivery:"steer"` or `delivery:"queue"` for active-recipient coordination that needs a reply in the same workflow. `send` supports `delivery:"queue"` for active-recipient follow-up, `delivery:"steer"` for urgent one-way course correction, and passive delivery for human-visible breadcrumbs only; avoid passive delivery for agent-to-agent coordination. If you want an approval dialog before non-reply sends, set `confirmSend: true` in config. Replies that include `replyTo` still skip confirmation so reply-hint flows can continue without an extra approval step.
 
 `ask` sends the message and waits up to `askTimeoutMs` (default 2 minutes). If the peer publishes `accepts_asks:false`, a default ask is still delivered but the tool returns promptly with `delivered:true`, `replied:false`, and `reason:"peer_idle"` instead of burning the full timeout. Explicit `delivery:"queue"` or `delivery:"steer"` asks keep waiting for a reply because the caller deliberately chose an active-recipient path. The peer can reply later as a normal intercom message.
 
@@ -470,7 +470,7 @@ Runtime files:
 
 **Auto-spawn with file lock.** The broker starts on first connection and exits after 5 seconds idle. There is no daemon to manage. A spawn lock file, keyed by PID and timestamp, prevents duplicate brokers when multiple sessions start at once.
 
-**`ask` stays client-side.** The broker still routes plain messages; it does not have a special request/response mode for `ask`. The client waits for a matching reply before it triggers a new turn, then returns that reply as the tool result. Reply hints make that flow practical by showing the recipient the exact `reply` call to use. Separately, `list` / `sessions` now carry a `requestId` so a delayed session-list reply cannot be mistaken for a newer one.
+**`ask` stays client-side.** The broker still routes plain messages; it does not have a special request/response mode for `ask`. The sender marks the message as expecting a reply, the recipient wakes or queues according to the delivery mode, and the sender waits for the matching reply before returning it as the tool result. Reply hints make that flow practical by showing the recipient the exact `reply` call to use. Separately, `list` / `sessions` now carry a `requestId` so a delayed session-list reply cannot be mistaken for a newer one.
 
 ## pi-intercom vs pi-messenger
 

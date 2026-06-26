@@ -241,10 +241,13 @@ class IntercomBroker {
             break;
           }
           this.touchActivity(currentId, true);
-          if (message.delivery === "queue" && message.queueMode === "replace" && message.threadId) {
-            this.queueReplaceDelivery(currentId, targets[0].info.id, fromSession.info, message);
+          const target = targets[0].info;
+          const targetStatus = target.status ?? "";
+          const targetIsIdle = targetStatus === "idle" || targetStatus.startsWith("idle ");
+          if (message.delivery === "queue" && message.queueMode === "replace" && message.threadId && (message.expectsReply || (targetIsIdle && target.acceptsAsks !== false))) {
+            this.queueReplaceDelivery(currentId, target.id, fromSession.info, message);
           } else {
-            this.deliverMessage(targets[0].info.id, fromSession.info, message);
+            this.deliverMessage(target.id, fromSession.info, message);
           }
           writeMessage(socket, { type: "delivered", messageId: message.id });
           break;

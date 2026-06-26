@@ -397,6 +397,15 @@ async function setupClients() {
   }
 }
 
+async function waitForSentMessages(harness: ReturnType<typeof createExtensionHarness>, count: number, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (harness.sentMessages.length >= count) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`Timed out waiting for ${count} sent messages; got ${harness.sentMessages.length}`);
+}
+
 function waitForReply(client: InstanceType<typeof IntercomClient>, replyTo: string, timeoutMs = 5000): Promise<{ from: SessionInfo; message: Message; }> {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
@@ -664,7 +673,7 @@ test("recipient turn failures are reported to waiting ask senders", { concurrenc
     const replyPromise = waitForReply(planner, "failure-ask");
 
     await planner.send(target.id, { messageId: "failure-ask", text: "Need answer", expectsReply: true });
-    await new Promise((resolve) => setImmediate(resolve));
+    await waitForSentMessages(harness, 1);
     await harness.emitLifecycle("turn_start");
     await harness.emitLifecycle("message_end", {
       message: { role: "assistant", stopReason: "error", errorMessage: "No API key for provider: test" },
@@ -691,7 +700,7 @@ test("recipient turn failures after tool turns still report to waiting ask sende
     const replyPromise = waitForReply(planner, "multi-turn-failure-ask");
 
     await planner.send(target.id, { messageId: "multi-turn-failure-ask", text: "Need answer", expectsReply: true });
-    await new Promise((resolve) => setImmediate(resolve));
+    await waitForSentMessages(harness, 1);
     await harness.emitLifecycle("turn_start");
     await harness.emitLifecycle("turn_end");
     await harness.emitLifecycle("turn_start");
@@ -720,7 +729,7 @@ test("recipient turn failures do not report after an ask is already replied", { 
     const firstReplyPromise = waitForReply(planner, "already-replied-ask");
 
     await planner.send(target.id, { messageId: "already-replied-ask", text: "Need answer", expectsReply: true });
-    await new Promise((resolve) => setImmediate(resolve));
+    await waitForSentMessages(harness, 1);
     await harness.emitLifecycle("turn_start");
     const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
     const replyResult = await intercomTool.execute("reply-before-error", {
@@ -757,7 +766,7 @@ test("recipient turn failure propagation stops after agent_end", { concurrency: 
     await harness.emitLifecycle("session_start");
     const target = await waitForSessionByName(planner, "agent-ended-worker");
     await planner.send(target.id, { messageId: "agent-ended-ask", text: "Need answer", expectsReply: true });
-    await new Promise((resolve) => setImmediate(resolve));
+    await waitForSentMessages(harness, 1);
     await harness.emitLifecycle("turn_start");
     await harness.emitLifecycle("turn_end");
     await harness.emitLifecycle("agent_end");
@@ -932,7 +941,7 @@ test("intercom tool accepts displayed short IDs when session names are duplicate
     }, new AbortController().signal, undefined, harness.ctx);
 
     assert.equal(result.isError, false);
-    assert.match(result.content[0]?.text ?? "", /wakes recipient/);
+    assert.match(result.content[0]?.text ?? "", /wakes idle recipients/);
     const [, message] = await messagePromise;
     assert.equal(message.content.text, "short id delivery works");
 
@@ -1194,7 +1203,7 @@ test("sessions publish automatic lifecycle status", { concurrency: false }, asyn
     statusSession = await waitForSessionStatus(planner, "status-worker", "idle");
     assert.equal(statusSession.acceptsAsks, false);
     contextIdle = true;
-    const deadline = Date.now() + 1000;
+    const deadline = Date.now() + 3000;
     while (Date.now() < deadline) {
       statusSession = await waitForSessionStatus(planner, "status-worker", "idle");
       if (statusSession.acceptsAsks === true) break;
@@ -2086,6 +2095,8 @@ test("busy non-interactive sessions auto-reply to top-level asks without abortin
     await harness.emitLifecycle("session_start");
 
     const target = await waitForSessionByName(planner, "pipe-worker");
+    await harness.emitLifecycle("agent_start");
+    await harness.emitLifecycle("tool_execution_start", { toolCallId: "pipe-tool", toolName: "bash" });
 
     let unexpectedReply = false;
     const plainSendHandler = () => { unexpectedReply = true; };
@@ -2098,6 +2109,35 @@ test("busy non-interactive sessions auto-reply to top-level asks without abortin
     await new Promise((resolve) => setTimeout(resolve, 100));
     planner.off("message", plainSendHandler);
     assert.equal(unexpectedReply, false);
+    assert.equal(harness.sentMessages.length, 1);
+    assert.match(harness.sentMessages[0]?.message.content ?? "", /FYI while busy/);
+    assert.equal(harness.sentMessages[0]?.options?.deliverAs, "steer");
+
+    const oldReplaceSend = await planner.send(target.id, {
+      messageId: "pipe-mode-replace-old",
+      text: "Old replace while busy.",
+      delivery: "queue",
+      queueMode: "replace",
+      threadId: "pipe-mode-thread",
+    });
+    assert.equal(oldReplaceSend.delivered, true);
+    await new Promise((resolve) => setTimeout(resolve, 1800));
+    const replaceSend = await planner.send(target.id, {
+      messageId: "pipe-mode-replace-new",
+      text: "Latest replace while busy.",
+      delivery: "queue",
+      queueMode: "replace",
+      threadId: "pipe-mode-thread",
+    });
+    assert.equal(replaceSend.delivered, true);
+    await new Promise((resolve) => setTimeout(resolve, 1800));
+    assert.equal(harness.sentMessages.length, 1);
+    await harness.emitLifecycle("tool_execution_end", { toolCallId: "pipe-tool", toolName: "bash" });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(harness.sentMessages.length, 2);
+    assert.match(harness.sentMessages[1]?.message.content ?? "", /Latest replace while busy/);
+    assert.doesNotMatch(harness.sentMessages[1]?.message.content ?? "", /Old replace/);
+    assert.equal(harness.sentMessages[1]?.options?.triggerTurn, true);
 
     const askId = "pipe-mode-ask";
     const replyPromise = waitForReply(planner, askId, 1000);

@@ -5,69 +5,26 @@ import { randomUUID } from "crypto";
 import { getPiAgentDir } from "../agent-dir.js";
 import { writeMessage, createMessageReader } from "./framing.js";
 import { getBrokerSocketPath } from "./paths.js";
-import type { SessionInfo, Message, Attachment, BrokerMessage } from "../types.js";
+import { isMessage } from "../types.js";
+import type { SessionInfo, Message, BrokerMessage } from "../types.js";
 
 const INTERCOM_DIR = join(getPiAgentDir(), "intercom");
 const SOCKET_PATH = getBrokerSocketPath();
 const PID_PATH = join(INTERCOM_DIR, "broker.pid");
+
+const REPLACE_DELIVERY_DELAY_MS = 1500;
 
 interface ConnectedSession {
   socket: net.Socket;
   info: SessionInfo;
 }
 
-function isAttachment(value: unknown): value is Attachment {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-
-  const attachment = value as Record<string, unknown>;
-
-  if (
-    attachment.type !== "file"
-    && attachment.type !== "snippet"
-    && attachment.type !== "context"
-  ) {
-    return false;
-  }
-
-  if (typeof attachment.name !== "string" || typeof attachment.content !== "string") {
-    return false;
-  }
-
-  return attachment.language === undefined || typeof attachment.language === "string";
-}
-
-function isMessage(value: unknown): value is Message {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-
-  const message = value as Record<string, unknown>;
-
-  if (typeof message.id !== "string" || typeof message.timestamp !== "number") {
-    return false;
-  }
-
-  if (message.replyTo !== undefined && typeof message.replyTo !== "string") {
-    return false;
-  }
-
-  if (message.expectsReply !== undefined && typeof message.expectsReply !== "boolean") {
-    return false;
-  }
-
-  if (typeof message.content !== "object" || message.content === null) {
-    return false;
-  }
-
-  const content = message.content as Record<string, unknown>;
-  if (typeof content.text !== "string") {
-    return false;
-  }
-
-  return content.attachments === undefined
-    || (Array.isArray(content.attachments) && content.attachments.every(isAttachment));
+interface PendingReplaceDelivery {
+  from: SessionInfo;
+  fromId: string;
+  toId: string;
+  message: Message;
+  timer: NodeJS.Timeout;
 }
 
 function isSessionRegistration(value: unknown): value is Omit<SessionInfo, "id"> {
@@ -112,6 +69,7 @@ function isSessionRegistration(value: unknown): value is Omit<SessionInfo, "id">
 
 class IntercomBroker {
   private sessions = new Map<string, ConnectedSession>();
+  private pendingReplaceDeliveries = new Map<string, PendingReplaceDelivery>();
   private server: net.Server;
   private shutdownTimer: NodeJS.Timeout | null = null;
 
@@ -152,6 +110,7 @@ class IntercomBroker {
     socket.on("close", () => {
       if (sessionId) {
         this.sessions.delete(sessionId);
+        this.clearPendingReplaceDeliveries(sessionId);
         this.broadcast({ type: "session_left", sessionId }, sessionId);
 
         this.scheduleShutdownCheck();
@@ -231,6 +190,7 @@ class IntercomBroker {
         }
         const sessionId = currentId;
         this.sessions.delete(sessionId);
+        this.clearPendingReplaceDeliveries(sessionId);
         this.broadcast({ type: "session_left", sessionId }, sessionId);
         setId(null);
         this.scheduleShutdownCheck();
@@ -281,12 +241,11 @@ class IntercomBroker {
             break;
           }
           this.touchActivity(currentId, true);
-          this.touchActivity(targets[0].info.id, true);
-          writeMessage(targets[0].socket, {
-            type: "message",
-            from: fromSession.info,
-            message,
-          });
+          if (message.delivery === "queue" && message.queueMode === "replace" && message.threadId) {
+            this.queueReplaceDelivery(currentId, targets[0].info.id, fromSession.info, message);
+          } else {
+            this.deliverMessage(targets[0].info.id, fromSession.info, message);
+          }
           writeMessage(socket, { type: "delivered", messageId: message.id });
           break;
         }
@@ -374,6 +333,46 @@ class IntercomBroker {
     if (comms) {
       session.info.lastIntercomActivity = now;
     }
+  }
+
+  private replaceKey(fromId: string, toId: string, threadId: string): string {
+    return `${fromId}\0${toId}\0${threadId}`;
+  }
+
+  private queueReplaceDelivery(fromId: string, toId: string, from: SessionInfo, message: Message): void {
+    const key = this.replaceKey(fromId, toId, message.threadId ?? "");
+    const existing = this.pendingReplaceDeliveries.get(key);
+    if (existing) {
+      clearTimeout(existing.timer);
+    }
+    const timer = setTimeout(() => {
+      this.pendingReplaceDeliveries.delete(key);
+      this.deliverMessage(toId, from, message);
+    }, REPLACE_DELIVERY_DELAY_MS);
+    timer.unref?.();
+    this.pendingReplaceDeliveries.set(key, { from, fromId, toId, message, timer });
+  }
+
+  private clearPendingReplaceDeliveries(sessionId: string): void {
+    for (const [key, pending] of this.pendingReplaceDeliveries) {
+      if (pending.toId === sessionId || (pending.fromId === sessionId && pending.message.expectsReply)) {
+        clearTimeout(pending.timer);
+        this.pendingReplaceDeliveries.delete(key);
+      }
+    }
+  }
+
+  private deliverMessage(toId: string, from: SessionInfo, message: Message): void {
+    const target = this.sessions.get(toId);
+    if (!target) {
+      return;
+    }
+    this.touchActivity(toId, true);
+    writeMessage(target.socket, {
+      type: "message",
+      from,
+      message,
+    });
   }
 
   private findSessions(nameOrId: string): ConnectedSession[] {

@@ -11,7 +11,7 @@ import { SessionListOverlay } from "./ui/session-list.ts";
 import { ComposeOverlay, type ComposeResult } from "./ui/compose.ts";
 import { InlineMessageComponent } from "./ui/inline-message.ts";
 import { loadConfig, type IntercomConfig } from "./config.ts";
-import type { SessionInfo, Message, Attachment } from "./types.ts";
+import type { SessionInfo, Message, Attachment, MessageDelivery, QueueMode } from "./types.ts";
 import { ReplyTracker } from "./reply-tracker.ts";
 import { formatSessionTarget, formatTargetOptions, targetDisplayName, resolveSessionTarget as resolveSessionTargetValue } from "./session-targets.ts";
 
@@ -48,7 +48,12 @@ interface InboundMessageEntry {
   bodyText: string;
 }
 
-type InboundDelivery = "trigger" | "followUp" | "passive";
+interface PendingInboundMessage extends InboundMessageEntry {
+  flushDelivery: "auto" | "passive";
+}
+
+type RequestedDelivery = MessageDelivery | "auto";
+type InboundDelivery = "trigger" | "followUp" | "steer" | "passive";
 
 type ContactSupervisorReason = "need_decision" | "progress_update" | "interview_request";
 
@@ -512,7 +517,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   let lastIntercomActivity = 0;
   const activeTools = new Map<string, string>();
   const replyTracker = new ReplyTracker(config.askTimeoutMs);
-  const pendingIdleMessages: InboundMessageEntry[] = [];
+  const pendingIdleMessages: PendingInboundMessage[] = [];
   let inboundFlushTimer: NodeJS.Timeout | null = null;
   let replyWaiter: {
     from: string;
@@ -636,14 +641,17 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       ...buildPresenceHealth(),
     };
   }
-  function canAcceptAsks(): boolean {
-    const liveContext = getLiveContext();
-    if (!liveContext || agentRunning || activeTools.size > 0) return false;
+  function isRecipientIdle(ctx: ExtensionContext): boolean {
+    if (agentRunning || activeTools.size > 0) return false;
     try {
-      return liveContext.isIdle();
+      return ctx.isIdle();
     } catch {
       return false;
     }
+  }
+  function canAcceptAsks(): boolean {
+    const liveContext = getLiveContext();
+    return liveContext ? isRecipientIdle(liveContext) : false;
   }
   /** Build peer-health fields published via presence so askers can detect idle/non-accepting peers. */
   function buildPresenceHealth(): { pendingAsks: number; acceptsAsks: boolean; lastIntercomActivity: number } {
@@ -668,6 +676,18 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     client.updatePresence({ status: currentStatus(), ...buildPresenceHealth() });
   }
+  function requestedDelivery(message: Message): RequestedDelivery {
+    if (message.passive === true || message.delivery === "passive") return "passive";
+    return message.delivery ?? "auto";
+  }
+  function shouldTriggerTurn(message: Message): boolean {
+    return requestedDelivery(message) !== "passive";
+  }
+  function queuedTriggerIndex(entries: PendingInboundMessage[]): number {
+    const canTrigger = (entry: PendingInboundMessage) => entry.flushDelivery !== "passive" && shouldTriggerTurn(entry.message);
+    const askIndex = entries.findIndex((entry) => canTrigger(entry) && entry.message.expectsReply === true);
+    return askIndex === -1 ? entries.findIndex(canTrigger) : askIndex;
+  }
   function currentSessionTargetMatches(to: string, resolvedTo?: string | null, activeClient?: IntercomClient): boolean {
     const targets = new Set<string>();
     const addTarget = (target: string | undefined | null) => {
@@ -685,11 +705,16 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     if (runtimeStarted && !getLiveContext(runtimeContext, generation)) {
       return;
     }
-    if (delivery === "trigger") {
+    if (delivery !== "passive") {
       replyTracker.queueTurnContext({ from: entry.from, message: entry.message, receivedAt: Date.now() });
     }
     const senderDisplay = entry.from.name || entry.from.id.slice(0, 8);
     const replyInstruction = entry.replyCommand ? `\n\nTo reply, use the intercom tool: ${entry.replyCommand}` : "";
+    const options = delivery === "trigger"
+      ? { triggerTurn: true }
+      : delivery === "followUp" || delivery === "steer"
+        ? { deliverAs: delivery }
+        : undefined;
     pi.sendMessage(
       {
         customType: "intercom_message",
@@ -697,9 +722,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         display: true,
         details: entry,
       },
-      delivery === "trigger"
-        ? { triggerTurn: true }
-        : { deliverAs: "followUp" }
+      options
     );
   }
   function isBlockingSubagentSupervisorMessage(entry: InboundMessageEntry): boolean {
@@ -756,26 +779,39 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       return;
     }
 
-    let isIdle: boolean;
-    try {
-      isIdle = ctx.isIdle();
-    } catch {
-      // Stale contexts are cleaned up by shutdown/reload; do not deliver queued messages through them.
-      return;
-    }
-    if (!isIdle) {
+    if (!isRecipientIdle(ctx)) {
       scheduleInboundFlush(INBOUND_IDLE_RETRY_MS);
       return;
     }
 
     const entries = pendingIdleMessages.splice(0, pendingIdleMessages.length);
-    const triggerIndex = entries.findIndex((entry) => entry.message.expectsReply);
+    const triggerIndex = queuedTriggerIndex(entries);
     entries.forEach((entry, index) => {
-      sendIncomingMessage(entry, index === triggerIndex ? "trigger" : "passive");
+      if (entry.flushDelivery === "passive") {
+        sendIncomingMessage(entry, "passive");
+        return;
+      }
+      sendIncomingMessage(entry, index === triggerIndex ? "trigger" : "followUp");
     });
   }
-  function queueIdleMessage(entry: InboundMessageEntry): void {
-    pendingIdleMessages.push(entry);
+  function queueIdleMessage(entry: InboundMessageEntry, flushDelivery: PendingInboundMessage["flushDelivery"] = "auto"): void {
+    let replacedPendingAsk = false;
+    if (entry.message.queueMode === "replace" && entry.message.threadId) {
+      for (let index = pendingIdleMessages.length - 1; index >= 0; index -= 1) {
+        const pending = pendingIdleMessages[index];
+        if (pending?.from.id === entry.from.id && pending.message.threadId === entry.message.threadId) {
+          pendingIdleMessages.splice(index, 1);
+          if (pending.message.expectsReply) {
+            replyTracker.markReplied(pending.message.id);
+            replacedPendingAsk = true;
+          }
+        }
+      }
+    }
+    if (replacedPendingAsk) {
+      syncPresenceStatus();
+    }
+    pendingIdleMessages.push({ ...entry, flushDelivery });
     scheduleInboundFlush();
   }
   function handleIncomingMessage(ctx: ExtensionContext, from: SessionInfo, message: Message): void {
@@ -812,7 +848,24 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       if (!activeContext) {
         return;
       }
-      if (!activeContext.isIdle()) {
+      const delivery = requestedDelivery(message);
+      if (delivery === "queue" && message.queueMode === "replace") {
+        queueIdleMessage(entry, "auto");
+        return;
+      }
+      if (!isRecipientIdle(activeContext)) {
+        if (delivery === "steer") {
+          sendIncomingMessage(entry, "steer", messageGeneration);
+          return;
+        }
+        if (delivery === "queue" && message.queueMode !== "replace") {
+          sendIncomingMessage(entry, "followUp", messageGeneration);
+          return;
+        }
+        if (delivery === "passive") {
+          queueIdleMessage(entry, "passive");
+          return;
+        }
         if (!activeContext.hasUI) {
           const activeClient = client;
           if (message.expectsReply && !message.replyTo && activeClient?.isConnected()) {
@@ -836,11 +889,11 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         if (!getLiveContext(liveContext, messageGeneration)) {
           return;
         }
-        queueIdleMessage(entry);
+        queueIdleMessage(entry, "auto");
         return;
       }
       if (getLiveContext(liveContext, messageGeneration)) {
-        sendIncomingMessage(entry, message.expectsReply ? "trigger" : "passive", messageGeneration);
+        sendIncomingMessage(entry, delivery === "passive" ? "passive" : "trigger", messageGeneration);
       }
     })();
   }
@@ -858,7 +911,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       }
       replyTracker.expireSender(sessionId);
       for (let index = pendingIdleMessages.length - 1; index >= 0; index -= 1) {
-        if (pendingIdleMessages[index]?.from.id === sessionId) {
+        const pending = pendingIdleMessages[index];
+        if (pending?.from.id === sessionId && pending.message.expectsReply) {
           pendingIdleMessages.splice(index, 1);
         }
       }
@@ -1220,6 +1274,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     activeTools.clear();
     replyTracker.endAgent();
     syncPresenceStatus();
+    setTimeout(() => syncPresenceStatus(), 0).unref?.();
     scheduleInboundFlush(0);
   });
   pi.on("turn_start", (_event, ctx) => {
@@ -1566,6 +1621,18 @@ Usage:
       replyTo: Type.Optional(Type.String({
         description: "Message ID to reply to (for threading or responding to an 'ask')",
       })),
+      delivery: Type.Optional(StringEnum(["queue", "steer", "passive"] as const, {
+        description: "Optional delivery mode: 'queue' waits behind active work, 'steer' injects after the current tool call, 'passive' does not wake the recipient model.",
+      })),
+      queueMode: Type.Optional(StringEnum(["stack", "replace"] as const, {
+        description: "For delivery='queue': 'stack' keeps all messages; 'replace' keeps only the latest undelivered message for the same threadId.",
+      })),
+      threadId: Type.Optional(Type.String({
+        description: "Stable topic key for queueMode='replace'.",
+      })),
+      passive: Type.Optional(Type.Boolean({
+        description: "For action='send' only: legacy alias for delivery='passive'. Discouraged for agent-to-agent messages.",
+      })),
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -1583,7 +1650,58 @@ Usage:
 
       syncPresenceIdentity(ctx.sessionManager.getSessionId());
 
-      const { action, to, message, attachments, replyTo } = params;
+      const { action, to, message, attachments, replyTo, delivery, queueMode, threadId, passive } = params;
+      if (passive !== undefined && action !== "send") {
+        return {
+          content: [{ type: "text", text: "'passive' is only valid for action='send'" }],
+          isError: true,
+          details: { error: true },
+        };
+      }
+      if (delivery === "passive" && action !== "send") {
+        return {
+          content: [{ type: "text", text: "delivery='passive' is only valid for action='send'" }],
+          isError: true,
+          details: { error: true },
+        };
+      }
+      if ((delivery !== undefined || queueMode !== undefined || threadId !== undefined) && action !== "send" && action !== "ask") {
+        return {
+          content: [{ type: "text", text: "'delivery', 'queueMode', and 'threadId' are only valid for action='send' or action='ask'" }],
+          isError: true,
+          details: { error: true },
+        };
+      }
+      if (passive === true && delivery !== undefined && delivery !== "passive") {
+        return {
+          content: [{ type: "text", text: "'passive' cannot be combined with a non-passive delivery mode" }],
+          isError: true,
+          details: { error: true },
+        };
+      }
+      if (threadId !== undefined && queueMode !== "replace") {
+        return {
+          content: [{ type: "text", text: "'threadId' is only valid with queueMode='replace'" }],
+          isError: true,
+          details: { error: true },
+        };
+      }
+      if (queueMode === "replace" && (!threadId || !threadId.trim())) {
+        return {
+          content: [{ type: "text", text: "queueMode='replace' requires a non-empty threadId" }],
+          isError: true,
+          details: { error: true },
+        };
+      }
+      const deliveryMode = (passive === true ? "passive" : delivery) as MessageDelivery | undefined;
+      const cleanedThreadId = typeof threadId === "string" ? threadId.trim() : undefined;
+      if (queueMode !== undefined && deliveryMode !== "queue") {
+        return {
+          content: [{ type: "text", text: "'queueMode' is only valid with delivery='queue'" }],
+          isError: true,
+          details: { error: true },
+        };
+      }
 
       switch (action) {
         case "list": {
@@ -1654,6 +1772,10 @@ Usage:
               text: message,
               attachments,
               replyTo,
+              delivery: deliveryMode,
+              queueMode: queueMode as QueueMode | undefined,
+              threadId: cleanedThreadId,
+              passive: passive === true,
             });
             if (!result.delivered) {
               const errorText = result.reason ?? "Session may not exist or has disconnected.";
@@ -1666,7 +1788,7 @@ Usage:
             markIntercomActivity();
             pi.appendEntry("intercom_sent", {
               to,
-              message: { text: message, attachments, replyTo },
+              message: { text: message, attachments, replyTo, delivery: deliveryMode, queueMode, threadId: cleanedThreadId, passive: passive === true },
               messageId: result.id,
               timestamp: Date.now(),
             });
@@ -1674,7 +1796,15 @@ Usage:
               replyTracker.markReplied(replyTo);
             }
             syncPresenceStatus();
-            const replyModeHint = replyTo ? "" : " (fire-and-forget; use `ask` when you need a reply)";
+            const replyModeHint = replyTo
+              ? ""
+              : deliveryMode === "passive"
+                ? " (passive; recipient model was not woken)"
+                : deliveryMode === "steer"
+                  ? " (steers active recipient after the current tool call)"
+                  : deliveryMode === "queue"
+                    ? " (queued for active recipient; use `ask` when you need a reply)"
+                    : " (wakes recipient; use `ask` when you need a reply)";
             return {
               content: [{ type: "text", text: `Message sent to ${to}${replyModeHint}` }],
               isError: false,
@@ -1732,7 +1862,7 @@ Usage:
               };
             }
             const peerHealth = await resolvePeerHealth(connectedClient, sendTo);
-            const peerIdle = peerDeclinesAsks(peerHealth);
+            const peerIdle = peerDeclinesAsks(peerHealth) && deliveryMode === undefined;
             if (_signal?.aborted) {
               return {
                 content: [{ type: "text", text: "Cancelled" }],
@@ -1751,6 +1881,9 @@ Usage:
               attachments,
               replyTo,
               expectsReply: true,
+              delivery: deliveryMode,
+              queueMode: queueMode as QueueMode | undefined,
+              threadId: cleanedThreadId,
             });
 
             if (!sendResult.delivered) {
@@ -1773,7 +1906,7 @@ Usage:
             syncPresenceStatus();
             pi.appendEntry("intercom_sent", {
               to,
-              message: { text: message, attachments, replyTo },
+              message: { text: message, attachments, replyTo, delivery: deliveryMode, queueMode, threadId: cleanedThreadId },
               messageId: sendResult.id,
               timestamp: Date.now(),
             });

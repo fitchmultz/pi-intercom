@@ -3,7 +3,8 @@ import net from "net";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.js";
 import { getBrokerSocketPath } from "./paths.js";
-import type { SessionInfo, Message, Attachment } from "../types.js";
+import { isMessage } from "../types.js";
+import type { SessionInfo, Message, Attachment, MessageDelivery, QueueMode } from "../types.js";
 
 const BROKER_SOCKET = getBrokerSocketPath();
 
@@ -24,6 +25,10 @@ interface SendOptions {
   attachments?: Attachment[];
   replyTo?: string;
   expectsReply?: boolean;
+  delivery?: MessageDelivery;
+  queueMode?: QueueMode;
+  threadId?: string;
+  passive?: boolean;
   messageId?: string;
 }
 
@@ -35,60 +40,6 @@ interface SendResult {
 
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
-}
-
-function isAttachment(value: unknown): value is Attachment {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-
-  const attachment = value as Record<string, unknown>;
-
-  if (
-    attachment.type !== "file"
-    && attachment.type !== "snippet"
-    && attachment.type !== "context"
-  ) {
-    return false;
-  }
-
-  if (typeof attachment.name !== "string" || typeof attachment.content !== "string") {
-    return false;
-  }
-
-  return attachment.language === undefined || typeof attachment.language === "string";
-}
-
-function isMessage(value: unknown): value is Message {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-
-  const message = value as Record<string, unknown>;
-
-  if (typeof message.id !== "string" || typeof message.timestamp !== "number") {
-    return false;
-  }
-
-  if (message.replyTo !== undefined && typeof message.replyTo !== "string") {
-    return false;
-  }
-
-  if (message.expectsReply !== undefined && typeof message.expectsReply !== "boolean") {
-    return false;
-  }
-
-  if (typeof message.content !== "object" || message.content === null) {
-    return false;
-  }
-
-  const content = message.content as Record<string, unknown>;
-  if (typeof content.text !== "string") {
-    return false;
-  }
-
-  return content.attachments === undefined
-    || (Array.isArray(content.attachments) && content.attachments.every(isAttachment));
 }
 
 function isSessionInfo(value: unknown): value is SessionInfo {
@@ -523,6 +474,10 @@ export class IntercomClient extends EventEmitter {
       timestamp: Date.now(),
       replyTo: options.replyTo,
       expectsReply: options.expectsReply,
+      delivery: options.delivery,
+      queueMode: options.queueMode,
+      threadId: options.threadId,
+      passive: options.passive,
       content: {
         text: options.text,
         attachments: options.attachments,

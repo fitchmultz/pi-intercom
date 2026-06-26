@@ -4,6 +4,18 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Added
+- Added explicit `delivery:"queue" | "steer" | "passive"` options for intercom messages. Stacked queued delivery maps to Pi native follow-up for active recipients, steering maps to Pi native steer, and passive delivery avoids waking the model.
+- Added `queueMode:"replace"` with `threadId` to replace older undelivered intercom-staged messages in the same thread before handing them to Pi.
+
+### Changed
+- `send` now wakes recipient agents by default; passive delivery is explicit via `delivery:"passive"` or legacy `passive:true` and discouraged for agent-to-agent coordination.
+
+### Fixed
+- Presence now republishes ask availability after `agent_end` settles so idle sessions do not stay stuck at `accepts_asks:false`.
+- Queued replacement delivery now treats Pi lifecycle/tool state as busy even if the extension context idle flag lags, broker-stages replacements long enough for sequential same-thread updates to coalesce before waking the recipient, keeps accepted non-reply queued messages after the sender disconnects, and drops queued asks whose sender disconnected before delivery.
+- Explicit `ask` delivery modes (`delivery:"queue"`/`"steer"`) now wait for replies even when peer health reports `accepts_asks:false`, so intentional active-recipient nudges keep their blocking reply contract.
+
 ## [0.6.1] - 2026-06-22
 
 ### Changed

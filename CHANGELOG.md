@@ -13,6 +13,7 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 - `send` now wakes recipient agents by default; passive delivery is explicit via `delivery:"passive"` or legacy `passive:true` and discouraged for agent-to-agent coordination.
 
 ### Fixed
+- Stale queued subagent `progress_update` messages are now dropped instead of waking the supervisor after the foreground run already completed.
 - Presence now republishes ask availability after `agent_end` settles so idle sessions do not stay stuck at `accepts_asks:false`.
 - Queued replacement delivery now treats Pi lifecycle/tool state as busy even if the extension context idle flag lags, broker-stages replacements long enough for sequential same-thread updates to coalesce before waking the recipient, keeps accepted non-reply queued messages after the sender disconnects, and drops queued asks whose sender disconnected before delivery.
 - Explicit `ask` delivery modes (`delivery:"queue"`/`"steer"`) now wait for replies even when peer health reports `accepts_asks:false`, so intentional active-recipient nudges keep their blocking reply contract.

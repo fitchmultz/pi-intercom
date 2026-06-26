@@ -14,19 +14,17 @@ import { loadConfig, type IntercomConfig } from "./config.ts";
 import type { SessionInfo, Message, Attachment, MessageDelivery, QueueMode } from "./types.ts";
 import { ReplyTracker } from "./reply-tracker.ts";
 import { formatSessionTarget, formatTargetOptions, targetDisplayName, resolveSessionTarget as resolveSessionTargetValue } from "./session-targets.ts";
+import { registerSubagentLiveEventHandlers } from "./subagent-live-events.ts";
 
 const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
 const SUBAGENT_RESULT_INTERCOM_EVENT = "subagent:result-intercom";
 const SUBAGENT_RESULT_INTERCOM_DELIVERY_EVENT = "subagent:result-intercom-delivery";
-const SUBAGENT_LIVE_INTERCOM_EVENT = "subagent:live-intercom";
-const SUBAGENT_LIVE_INTERCOM_DELIVERY_EVENT = "subagent:live-intercom-delivery";
-const SUBAGENT_INTERCOM_HEALTH_REQUEST_EVENT = "subagent:intercom-health-request";
-const SUBAGENT_INTERCOM_HEALTH_RESPONSE_EVENT = "subagent:intercom-health-response";
 const INTERCOM_DETACH_REQUEST_EVENT = "pi-intercom:detach-request";
 const INTERCOM_DETACH_RESPONSE_EVENT = "pi-intercom:detach-response";
 const INTERCOM_DETACH_RESPONSE_TIMEOUT_MS = 500;
 const INBOUND_FLUSH_DELAY_MS = 200;
 const INBOUND_IDLE_RETRY_MS = 500;
+const SUBAGENT_PROGRESS_UPDATE_MAX_AGE_MS = 60_000;
 const DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX = "subagent-chat";
 const RECIPIENT_TURN_FAILED_PREFIX = "Recipient turn failed:";
 const RECIPIENT_TURN_FAILED_ATTACHMENT = "pi-intercom-recipient-turn-failure";
@@ -735,6 +733,11 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     return text.startsWith("Subagent needs a supervisor decision.")
       || text.startsWith("Subagent requests a structured supervisor interview.");
   }
+  function isStaleSubagentProgressUpdate(entry: InboundMessageEntry, now = Date.now()): boolean {
+    if (entry.message.expectsReply) return false;
+    return entry.bodyText.trimStart().startsWith("Subagent progress update.")
+      && now - entry.message.timestamp > SUBAGENT_PROGRESS_UPDATE_MAX_AGE_MS;
+  }
   async function requestSubagentDetachForBlockingSupervisorMessage(entry: InboundMessageEntry): Promise<boolean> {
     if (!isBlockingSubagentSupervisorMessage(entry)) return false;
     const requestId = randomUUID();
@@ -788,7 +791,11 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       return;
     }
 
-    const entries = pendingIdleMessages.splice(0, pendingIdleMessages.length);
+    const now = Date.now();
+    const entries = pendingIdleMessages
+      .splice(0, pendingIdleMessages.length)
+      .filter((entry) => !isStaleSubagentProgressUpdate(entry, now));
+    if (entries.length === 0) return;
     const triggerIndex = queuedTriggerIndex(entries);
     entries.forEach((entry, index) => {
       if (entry.flushDelivery === "passive") {
@@ -1139,86 +1146,17 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       }
     })();
   }
-  function emitLiveDelivery(requestId: string | undefined, delivered: boolean, reason?: string): void {
-    if (!requestId) return;
-    pi.events.emit(SUBAGENT_LIVE_INTERCOM_DELIVERY_EVENT, {
-      requestId,
-      delivered,
-      ...(reason ? { reason } : {}),
-    });
-  }
-  function relayLiveSubagentMessage(payload: unknown): void {
-    if (!payload || typeof payload !== "object") return;
-    const parsed = payload as { requestId?: unknown; to?: unknown; message?: unknown; delivery?: unknown };
-    if (typeof parsed.requestId !== "string" || typeof parsed.to !== "string" || typeof parsed.message !== "string") return;
-    const requestId = parsed.requestId;
-    const to = parsed.to;
-    const message = parsed.message;
-    const delivery = parsed.delivery === "queue" ? "queue" : "steer";
-    const relayGeneration = runtimeGeneration;
-    void (async () => {
-      const relayStillLive = () => !runtimeStarted || Boolean(getLiveContext(runtimeContext, relayGeneration));
-      if (!relayStillLive()) return;
-      let activeClient: IntercomClient;
-      let target: string;
-      try {
-        activeClient = await ensureConnected("background");
-        target = await resolveSessionTarget(activeClient, to) ?? to;
-      } catch (error) {
-        if (relayStillLive()) emitLiveDelivery(requestId, false, getErrorMessage(error));
-        return;
-      }
-      if (!relayStillLive()) return;
-      if (currentSessionTargetMatches(to, target, activeClient)) {
-        emitLiveDelivery(requestId, false, "Cannot message the current session");
-        return;
-      }
-      try {
-        const result = await activeClient.send(target, { text: message, delivery });
-        if (!relayStillLive()) return;
-        emitLiveDelivery(requestId, result.delivered, result.reason);
-      } catch (error) {
-        if (relayStillLive()) emitLiveDelivery(requestId, false, getErrorMessage(error));
-      }
-    })();
-  }
-  function answerLiveIntercomHealth(payload: unknown): void {
-    if (!payload || typeof payload !== "object") return;
-    const parsed = payload as { requestId?: unknown; targets?: unknown };
-    if (typeof parsed.requestId !== "string" || !Array.isArray(parsed.targets)) return;
-    const targets = parsed.targets.filter((target): target is string => typeof target === "string" && target.trim().length > 0);
-    const relayGeneration = runtimeGeneration;
-    void (async () => {
-      if (targets.length === 0 || (runtimeStarted && !getLiveContext(runtimeContext, relayGeneration))) return;
-      try {
-        const activeClient = await ensureConnected("background");
-        const sessions = await activeClient.listSessions();
-        const health = targets.map((target) => {
-          const resolution = resolveSessionTargetValue(sessions, target);
-          if (resolution.status !== "found") return { target, status: resolution.status };
-          const session = resolution.target!;
-          return {
-            target,
-            status: "registered" as const,
-            resolvedTarget: formatSessionTarget(session, sessions),
-            sessionId: session.id,
-            ...(session.name ? { sessionName: session.name } : {}),
-            ...(session.status ? { sessionStatus: session.status } : {}),
-            ...(session.acceptsAsks !== undefined ? { acceptsAsks: session.acceptsAsks } : {}),
-            ...(session.pendingAsks !== undefined ? { pendingAsks: session.pendingAsks } : {}),
-            ...(session.lastSeen !== undefined ? { lastSeen: session.lastSeen } : {}),
-            ...(session.lastIntercomActivity !== undefined ? { lastIntercomActivity: session.lastIntercomActivity } : {}),
-          };
-        });
-        pi.events.emit(SUBAGENT_INTERCOM_HEALTH_RESPONSE_EVENT, { requestId: parsed.requestId, health });
-      } catch {
-        pi.events.emit(SUBAGENT_INTERCOM_HEALTH_RESPONSE_EVENT, { requestId: parsed.requestId, health: targets.map((target) => ({ target, status: "missing" })) });
-      }
-    })();
-  }
   const eventUnsubscribes = [
-    pi.events.on(SUBAGENT_LIVE_INTERCOM_EVENT, relayLiveSubagentMessage),
-    pi.events.on(SUBAGENT_INTERCOM_HEALTH_REQUEST_EVENT, answerLiveIntercomHealth),
+    ...registerSubagentLiveEventHandlers({
+      events: pi.events,
+      ensureConnected: () => ensureConnected("background"),
+      resolveSessionTarget,
+      currentSessionTargetMatches,
+      getLivenessCheck: () => {
+        const generation = runtimeGeneration;
+        return () => !runtimeStarted || Boolean(getLiveContext(runtimeContext, generation));
+      },
+    }),
     pi.events.on(SUBAGENT_CONTROL_INTERCOM_EVENT, (payload) => {
       relaySubagentIntercomPayload(payload, {
         sender: "subagent-control",
@@ -1501,6 +1439,9 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           try {
             const result = await connectedClient.send(sendTo, {
               text: formatChildOrchestratorMessage("update", metadata, message),
+              delivery: "queue",
+              queueMode: "replace",
+              threadId: `subagent-progress:${metadata.runId}:${metadata.agent}:${metadata.index}`,
             });
             if (!result.delivered) {
               const errorText = result.reason ?? "Session may not exist or has disconnected.";

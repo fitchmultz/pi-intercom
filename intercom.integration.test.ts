@@ -1820,6 +1820,53 @@ test("busy passive delivery waits for idle without waking the model", { concurre
   }
 });
 
+test("stale queued subagent progress updates are dropped", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  let idle = false;
+  const harness = createExtensionHarness("stale-progress-supervisor", {
+    hasUI: true,
+    isIdle: () => idle,
+  });
+  const realNow = Date.now;
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const target = await waitForSessionByName(planner, "stale-progress-supervisor");
+
+    Date.now = () => realNow() - 120_000;
+    assert.equal((await planner.send(target.id, {
+      messageId: "stale-progress-update",
+      text: [
+        "Subagent progress update.",
+        "Run: old-run",
+        "Agent: scout",
+        "Child index: 0",
+        "",
+        "UPDATE: Starting read-only scout.",
+      ].join("\n"),
+      delivery: "queue",
+      queueMode: "replace",
+      threadId: "subagent-progress:old-run:scout:0",
+    })).delivered, true);
+    Date.now = realNow;
+
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(harness.sentMessages.length, 0);
+
+    idle = true;
+    await harness.emitLifecycle("agent_end");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.equal(harness.sentMessages.length, 0);
+  } finally {
+    Date.now = realNow;
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
 test("intercom tool validates passive and replace delivery options", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { cleanup } = await setupClients();
@@ -2158,6 +2205,9 @@ test("child supervisor tool resolves target and includes run metadata", { concur
       const updateResult = await supervisorTool.execute("update-1", { reason: "progress_update", message: "Found a schema mismatch." }, new AbortController().signal, undefined, harness.ctx);
       const [_updateFrom, updateMessage] = await updateReceived;
       assert.equal(updateMessage.expectsReply, undefined);
+      assert.equal(updateMessage.delivery, "queue");
+      assert.equal(updateMessage.queueMode, "replace");
+      assert.equal(updateMessage.threadId, "subagent-progress:78f659a3:worker:0");
       assert.match(updateMessage.content.text, /Subagent progress update/);
       assert.match(updateMessage.content.text, /Run: 78f659a3/);
       assert.match(updateMessage.content.text, /Agent: worker/);

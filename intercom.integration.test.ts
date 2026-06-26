@@ -2580,6 +2580,88 @@ test("foreground subagent result intercom events are acknowledged without messag
   assert.deepEqual(deliveryAcks, [{ requestId: "result-foreground", delivered: true }]);
 });
 
+test("subagent live intercom events steer a registered child", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const broker = await setupBroker();
+  const child = new IntercomClient();
+  const harness = createExtensionHarness("supervisor");
+  const deliveryAcks: unknown[] = [];
+  harness.pi.events.on("subagent:live-intercom-delivery", (payload) => deliveryAcks.push(payload));
+  try {
+    await child.connect({
+      name: "subagent-worker-run-live-1",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    });
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    await waitForSessionByName(child, "supervisor");
+    const messagePromise = once(child, "message") as Promise<[SessionInfo, Message]>;
+
+    harness.pi.events.emit("subagent:live-intercom", {
+      requestId: "live-1",
+      to: "subagent-worker-run-live-1",
+      message: "please report status",
+      delivery: "steer",
+    });
+
+    const [, message] = await messagePromise;
+    assert.equal(message.content.text, "please report status");
+    const deadline = Date.now() + 2000;
+    while (deliveryAcks.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.deepEqual(deliveryAcks, [{ requestId: "live-1", delivered: true }]);
+  } finally {
+    await harness.emitLifecycle("session_shutdown").catch(() => undefined);
+    await child.disconnect().catch(() => undefined);
+    await stopBroker(broker);
+  }
+});
+
+test("subagent intercom health queries report registered and missing targets", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const broker = await setupBroker();
+  const child = new IntercomClient();
+  const harness = createExtensionHarness("supervisor-health");
+  const responses: unknown[] = [];
+  harness.pi.events.on("subagent:intercom-health-response", (payload) => responses.push(payload));
+  try {
+    await child.connect({
+      name: "subagent-worker-health-1",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    });
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    await waitForSessionByName(child, "supervisor-health");
+
+    harness.pi.events.emit("subagent:intercom-health-request", {
+      requestId: "health-1",
+      targets: ["subagent-worker-health-1", "missing-child"],
+    });
+    const deadline = Date.now() + 2000;
+    while (responses.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+
+    assert.equal(responses.length, 1);
+    const response = responses[0] as { requestId?: string; health?: Array<Record<string, unknown>> };
+    assert.equal(response.requestId, "health-1");
+    const registered = response.health?.find((item) => item.target === "subagent-worker-health-1");
+    const missing = response.health?.find((item) => item.target === "missing-child");
+    assert.equal(registered?.status, "registered");
+    assert.equal(registered?.sessionName, "subagent-worker-health-1");
+    assert.equal(missing?.status, "none");
+  } finally {
+    await harness.emitLifecycle("session_shutdown").catch(() => undefined);
+    await child.disconnect().catch(() => undefined);
+    await stopBroker(broker);
+  }
+});
+
 test("async ask can be replied to later from the single pending ask fallback", { concurrency: false }, async () => {
   const { planner, orchestrator, cleanup } = await setupClients();
   const replyTracker = new ReplyTracker();

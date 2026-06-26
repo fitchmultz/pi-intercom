@@ -248,6 +248,8 @@ This workflow requires [`pi-subagents`](https://github.com/nicobailon/pi-subagen
 
 If any are missing, the session falls back to the regular `intercom` tool. A subagent status line may mention an intercom target before the child is actually registered with pi-intercom; treat `intercom({ action: "list" })` as the source of truth. If the advertised target is absent from `list`, use `contact_supervisor` from the child side or normal subagent controls instead of sending to that target.
 
+When both extensions are enabled, parent sessions can use `subagent({ action: "nudge", id: "<run-id>", message: "..." })` to send a non-blocking steered nudge to a live child. `subagent status` may also show the direct blocking `intercom({ action: "ask", to: "...", delivery: "steer", message: "..." })` path. `pi-intercom` remains the source of truth for connected sessions and only delivers to registered local peers.
+
 ### Three Reasons
 
 | Reason | Behavior | Use When |

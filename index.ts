@@ -18,6 +18,10 @@ import { formatSessionTarget, formatTargetOptions, targetDisplayName, resolveSes
 const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
 const SUBAGENT_RESULT_INTERCOM_EVENT = "subagent:result-intercom";
 const SUBAGENT_RESULT_INTERCOM_DELIVERY_EVENT = "subagent:result-intercom-delivery";
+const SUBAGENT_LIVE_INTERCOM_EVENT = "subagent:live-intercom";
+const SUBAGENT_LIVE_INTERCOM_DELIVERY_EVENT = "subagent:live-intercom-delivery";
+const SUBAGENT_INTERCOM_HEALTH_REQUEST_EVENT = "subagent:intercom-health-request";
+const SUBAGENT_INTERCOM_HEALTH_RESPONSE_EVENT = "subagent:intercom-health-response";
 const INTERCOM_DETACH_REQUEST_EVENT = "pi-intercom:detach-request";
 const INTERCOM_DETACH_RESPONSE_EVENT = "pi-intercom:detach-response";
 const INTERCOM_DETACH_RESPONSE_TIMEOUT_MS = 500;
@@ -1135,7 +1139,86 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       }
     })();
   }
+  function emitLiveDelivery(requestId: string | undefined, delivered: boolean, reason?: string): void {
+    if (!requestId) return;
+    pi.events.emit(SUBAGENT_LIVE_INTERCOM_DELIVERY_EVENT, {
+      requestId,
+      delivered,
+      ...(reason ? { reason } : {}),
+    });
+  }
+  function relayLiveSubagentMessage(payload: unknown): void {
+    if (!payload || typeof payload !== "object") return;
+    const parsed = payload as { requestId?: unknown; to?: unknown; message?: unknown; delivery?: unknown };
+    if (typeof parsed.requestId !== "string" || typeof parsed.to !== "string" || typeof parsed.message !== "string") return;
+    const requestId = parsed.requestId;
+    const to = parsed.to;
+    const message = parsed.message;
+    const delivery = parsed.delivery === "queue" ? "queue" : "steer";
+    const relayGeneration = runtimeGeneration;
+    void (async () => {
+      const relayStillLive = () => !runtimeStarted || Boolean(getLiveContext(runtimeContext, relayGeneration));
+      if (!relayStillLive()) return;
+      let activeClient: IntercomClient;
+      let target: string;
+      try {
+        activeClient = await ensureConnected("background");
+        target = await resolveSessionTarget(activeClient, to) ?? to;
+      } catch (error) {
+        if (relayStillLive()) emitLiveDelivery(requestId, false, getErrorMessage(error));
+        return;
+      }
+      if (!relayStillLive()) return;
+      if (currentSessionTargetMatches(to, target, activeClient)) {
+        emitLiveDelivery(requestId, false, "Cannot message the current session");
+        return;
+      }
+      try {
+        const result = await activeClient.send(target, { text: message, delivery });
+        if (!relayStillLive()) return;
+        emitLiveDelivery(requestId, result.delivered, result.reason);
+      } catch (error) {
+        if (relayStillLive()) emitLiveDelivery(requestId, false, getErrorMessage(error));
+      }
+    })();
+  }
+  function answerLiveIntercomHealth(payload: unknown): void {
+    if (!payload || typeof payload !== "object") return;
+    const parsed = payload as { requestId?: unknown; targets?: unknown };
+    if (typeof parsed.requestId !== "string" || !Array.isArray(parsed.targets)) return;
+    const targets = parsed.targets.filter((target): target is string => typeof target === "string" && target.trim().length > 0);
+    const relayGeneration = runtimeGeneration;
+    void (async () => {
+      if (targets.length === 0 || (runtimeStarted && !getLiveContext(runtimeContext, relayGeneration))) return;
+      try {
+        const activeClient = await ensureConnected("background");
+        const sessions = await activeClient.listSessions();
+        const health = targets.map((target) => {
+          const resolution = resolveSessionTargetValue(sessions, target);
+          if (resolution.status !== "found") return { target, status: resolution.status };
+          const session = resolution.target!;
+          return {
+            target,
+            status: "registered" as const,
+            resolvedTarget: formatSessionTarget(session, sessions),
+            sessionId: session.id,
+            ...(session.name ? { sessionName: session.name } : {}),
+            ...(session.status ? { sessionStatus: session.status } : {}),
+            ...(session.acceptsAsks !== undefined ? { acceptsAsks: session.acceptsAsks } : {}),
+            ...(session.pendingAsks !== undefined ? { pendingAsks: session.pendingAsks } : {}),
+            ...(session.lastSeen !== undefined ? { lastSeen: session.lastSeen } : {}),
+            ...(session.lastIntercomActivity !== undefined ? { lastIntercomActivity: session.lastIntercomActivity } : {}),
+          };
+        });
+        pi.events.emit(SUBAGENT_INTERCOM_HEALTH_RESPONSE_EVENT, { requestId: parsed.requestId, health });
+      } catch {
+        pi.events.emit(SUBAGENT_INTERCOM_HEALTH_RESPONSE_EVENT, { requestId: parsed.requestId, health: targets.map((target) => ({ target, status: "missing" })) });
+      }
+    })();
+  }
   const eventUnsubscribes = [
+    pi.events.on(SUBAGENT_LIVE_INTERCOM_EVENT, relayLiveSubagentMessage),
+    pi.events.on(SUBAGENT_INTERCOM_HEALTH_REQUEST_EVENT, answerLiveIntercomHealth),
     pi.events.on(SUBAGENT_CONTROL_INTERCOM_EVENT, (payload) => {
       relaySubagentIntercomPayload(payload, {
         sender: "subagent-control",

@@ -1176,34 +1176,45 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       }
     })();
   }
-  const eventUnsubscribes = [
-    ...registerSubagentLiveEventHandlers({
-      events: pi.events,
-      ensureConnected: () => ensureConnected("background"),
-      resolveSessionTarget,
-      currentSessionTargetMatches,
-      getLivenessCheck: () => {
-        const generation = runtimeGeneration;
-        return () => !runtimeStarted || Boolean(getLiveContext(runtimeContext, generation));
-      },
-    }),
-    pi.events.on(SUBAGENT_CONTROL_INTERCOM_EVENT, (payload) => {
-      relaySubagentIntercomPayload(payload, {
-        sender: "subagent-control",
-        status: "needs_attention",
-        errorEntryType: "intercom_control_error",
-      });
-    }),
-    pi.events.on(SUBAGENT_RESULT_INTERCOM_EVENT, (payload) => {
-      relaySubagentIntercomPayload(payload, {
-        sender: "subagent-result",
-        status: "result",
-        errorEntryType: "intercom_result_error",
-        acknowledge: true,
-      });
-    }),
-  ];
+  // Subagent event bridges (live/health/control/result) are torn down on session_shutdown.
+  // Re-register them on session_start so they survive an in-process restart; the guard skips
+  // the first start (already registered at load) and only restores after a shutdown cleared them.
+  function registerSubagentEventBridges(): Array<() => void> {
+    return [
+      ...registerSubagentLiveEventHandlers({
+        events: pi.events,
+        ensureConnected: () => ensureConnected("background"),
+        resolveSessionTarget,
+        currentSessionTargetMatches,
+        getLivenessCheck: () => {
+          const generation = runtimeGeneration;
+          return () => !runtimeStarted || Boolean(getLiveContext(runtimeContext, generation));
+        },
+      }),
+      pi.events.on(SUBAGENT_CONTROL_INTERCOM_EVENT, (payload) => {
+        relaySubagentIntercomPayload(payload, {
+          sender: "subagent-control",
+          status: "needs_attention",
+          errorEntryType: "intercom_control_error",
+        });
+      }),
+      pi.events.on(SUBAGENT_RESULT_INTERCOM_EVENT, (payload) => {
+        relaySubagentIntercomPayload(payload, {
+          sender: "subagent-result",
+          status: "result",
+          errorEntryType: "intercom_result_error",
+          acknowledge: true,
+        });
+      }),
+    ];
+  }
+  let eventUnsubscribes = registerSubagentEventBridges();
+  let eventBridgesActive = true;
   pi.on("session_start", (_event, ctx) => {
+    if (!eventBridgesActive) {
+      eventUnsubscribes = registerSubagentEventBridges();
+      eventBridgesActive = true;
+    }
     if (!config.enabled) {
       return;
     }
@@ -1245,6 +1256,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         // Best effort cleanup for reload/session replacement.
       }
     }
+    eventUnsubscribes = [];
+    eventBridgesActive = false;
     shuttingDown = true;
     disposed = true;
     runtimeGeneration += 1;

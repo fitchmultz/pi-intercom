@@ -2786,3 +2786,63 @@ test("async ask can be replied to later from the single pending ask fallback", {
     await cleanup();
   }
 });
+
+test("subagent live/control event bridges survive an in-process session restart", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("restart-bridge-worker", { hasUI: true });
+  const sessionName = "restart-bridge-worker";
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    await waitForSessionByName(planner, sessionName);
+
+    // Control bridge: a self-targeted control event delivers locally (no broker send).
+    harness.pi.events.emit("subagent:control-intercom", {
+      to: sessionName,
+      message: "control before restart",
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.match(harness.sentMessages[0]?.message.content ?? "", /control before restart/);
+
+    // Restart the session in the same extension instance. session_shutdown tears the
+    // bridges down; session_start must re-register them or they stay dead.
+    await harness.emitLifecycle("session_shutdown");
+    await harness.emitLifecycle("session_start");
+    await waitForSessionByName(planner, sessionName);
+
+    // Control bridge is still handled after the restart.
+    harness.pi.events.emit("subagent:control-intercom", {
+      to: sessionName,
+      message: "control after restart",
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.match(harness.sentMessages[1]?.message.content ?? "", /control after restart/);
+
+    // Live bridge is still handled after the restart: a self-targeted live send resolves
+    // to "cannot message the current session" and emits a delivery response, proving the
+    // handler registered by registerSubagentLiveEventHandlers actually ran.
+    const liveDelivery = new Promise<{ delivered: boolean; reason?: string }>((resolve) => {
+      harness.pi.events.on("subagent:live-intercom-delivery", (payload) => {
+        resolve(payload as { delivered: boolean; reason?: string });
+      });
+    });
+    harness.pi.events.emit("subagent:live-intercom", {
+      requestId: "live-after-restart",
+      to: sessionName,
+      message: "live after restart",
+      delivery: "steer",
+    });
+    const liveResult = await Promise.race([
+      liveDelivery,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 2000)),
+    ]);
+    assert.ok(liveResult, "live bridge delivery response should fire after restart");
+    assert.equal(liveResult!.delivered, false);
+    assert.match(liveResult!.reason ?? "", /Cannot message the current session/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});

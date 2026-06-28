@@ -554,6 +554,62 @@ test("intercom tool empty list output gives local fork next steps", { concurrenc
   }
 });
 
+test("intercom list and status show recipient capability and delivery guidance", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const broker = await setupBroker();
+  const harness = createExtensionHarness("capability-controller", { hasUI: true });
+  const busyPeer = new IntercomClient();
+
+  try {
+    await busyPeer.connect({
+      name: "busy-peer",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+      status: "thinking",
+      acceptsAsks: false,
+      pendingAsks: 2,
+      lastIntercomActivity: Date.now() - 65_000,
+    });
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+
+    const listResult = await intercomTool.execute("tool-capability-list", {
+      action: "list",
+    }, new AbortController().signal, undefined, harness.ctx);
+    const listText = listResult.content[0]?.text ?? "";
+    assert.equal(listResult.isError, false);
+    assert.match(listText, /capability-controller/);
+    assert.match(listText, /self target unavailable; choose a peer from Other sessions; use pending\/reply for inbound asks/);
+    assert.match(listText, /busy-peer/);
+    assert.match(listText, /state:busy/);
+    assert.match(listText, /accepts_asks:false/);
+    assert.match(listText, /pending_asks:2/);
+    assert.match(listText, /last_intercom_activity:1m ago/);
+    assert.match(listText, /default ask returns peer_idle/);
+    assert.match(listText, /passive discouraged/);
+
+    const statusResult = await intercomTool.execute("tool-capability-status", {
+      action: "status",
+    }, new AbortController().signal, undefined, harness.ctx);
+    const statusText = statusResult.content[0]?.text ?? "";
+    assert.equal(statusResult.isError, false);
+    assert.match(statusText, /Intercom Status/);
+    assert.match(statusText, /Current session/);
+    assert.match(statusText, /Other sessions/);
+    assert.match(statusText, /self target unavailable/);
+    assert.match(statusText, /busy-peer/);
+    assert.match(statusText, /queue for normal follow-up/);
+  } finally {
+    await busyPeer.disconnect().catch(() => undefined);
+    await harness.emitLifecycle("session_shutdown");
+    await stopBroker(broker);
+  }
+});
+
 test("plain sends wake by default, passive sends do not, and only asks show reply hints", { concurrency: false }, async () => {
   const { planner, cleanup } = await setupClients();
   const { default: piIntercomExtension } = await import("./index.ts");

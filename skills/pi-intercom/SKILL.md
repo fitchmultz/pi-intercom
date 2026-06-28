@@ -11,7 +11,7 @@ Coordinate named Pi sessions on the same machine with the least context loss and
 
 ## Source of truth
 
-- `intercom({ action: "list" })` is the source of truth for targetable sessions. It shows only intercom-connected sessions, not every Pi process.
+- `intercom({ action: "list" })` is the source of truth for targetable sessions. It shows only intercom-connected sessions, not every Pi process, with live ask capability, busy/idle/unknown state, recent intercom activity, and delivery guidance. The current-session row is not targetable; choose a peer from Other sessions.
 - Tool behavior comes from this package's `index.ts` and `README.md`; inspect them if examples drift.
 - Pi CLI flags for local peer sessions are `--name`, `--extension`, and `--skill`.
 
@@ -49,10 +49,10 @@ intercom({ action: "list" })
 | `ask` | Decisions, clarifications, ACKs needed now | Wakes/queues the recipient and waits up to `askTimeoutMs` (default 2 minutes); default asks to peers reporting `accepts_asks:false` return `delivered:true`, `replied:false`, `reason:"peer_idle"`, while explicit `delivery:"queue"`/`"steer"` asks still wait for a reply; not passive |
 | `reply` | Answering an inbound ask | Uses the active ask, or the single pending ask |
 | `pending` | Multiple or delayed inbound asks | Lists unresolved asks so you can disambiguate |
-| `status` | Troubleshooting connection state | Shows connection and active session count |
+| `status` | Troubleshooting connection state | Shows connection, active session count, and the same live recipient capability/guidance rows as `list` |
 
 5. Write compact messages with objective, scope, relevant files, stop boundary, and expected reply.
-6. For long work, use `send` for checkpoints the recipient agent should see, and use `ask` when a reply is required. If the recipient is active, use `delivery:"queue"` for normal follow-up and `delivery:"steer"` only when its current path is likely wrong. Avoid passive delivery unless the note is only for the human transcript.
+6. For long work, use `send` for checkpoints the recipient agent should see, and use `ask` when a reply is required. Trust the `list`/`status` guidance rows: if the recipient is active, use `delivery:"queue"` for normal follow-up and `delivery:"steer"` only when its current path is likely wrong. Avoid passive delivery unless the note is only for the human transcript.
 7. After tool results, continue from the reply or error. Do not assume delivery after a failed result.
 
 ## Common calls

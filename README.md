@@ -94,17 +94,20 @@ The agent can list sessions and send messages using the `intercom` tool. Tool ca
 // List active sessions
 intercom({ action: "list" })
 // → **Current session:**
-// → • executor (20d43841) — ~/projects/api (claude-sonnet-4) [self, idle]
+// → • executor (20d43841) — ~/projects/api (claude-sonnet-4) [self, idle, state:idle, accepts_asks:true, pending_asks:0, last_intercom_activity:none]
+// →   ↳ self target unavailable; choose a peer from Other sessions; use pending/reply for inbound asks
 // → **Other sessions:**
-// → • research (6332faab) — ~/projects/api (claude-sonnet-4) [same cwd, thinking]
+// → • research (6332faab) — ~/projects/api (claude-sonnet-4) [same cwd, thinking, state:busy, accepts_asks:false, pending_asks:1, last_intercom_activity:2m ago]
+// →   ↳ send accepted; default ask returns peer_idle; use queue for normal follow-up, steer only to redirect; passive discouraged
 
 // Ask a peer to start work and reply inline
 intercom({ action: "ask", to: "research", message: "Check if UserService.validate() handles null. Reply with what you find." })
 // → Reply from research: UserService.validate() handles null via the guard at line 42.
 
-// Check connection status
+// Check connection status and the same live recipient guidance
 intercom({ action: "status" })
 // → Connected: Yes, Session ID: abc123, Active sessions: 3
+// → Current session and other-session rows follow.
 
 // Send with attachments (code snippets, files, or context)
 intercom({
@@ -363,7 +366,7 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 
 ### intercom actions
 
-**`list`** — Returns the current session plus other active intercom-connected sessions with name, safe target, working directory, model, live status, and peer health tags: `accepts_asks`, `pending_asks`, `last_intercom_activity`, and `last_seen`. Status is derived automatically from Pi lifecycle events: `idle`, `thinking`, or `tool:<name>`. If multiple sessions have the same name, use the displayed target exactly as shown, for example `to: "ca7bfec2"`. The target may be longer than eight characters when needed to avoid collisions.
+**`list`** — Returns the current session plus other active intercom-connected sessions with name, safe target, working directory, model, live status, and peer health tags: `state` (`idle`, `busy`, or `unknown`), `accepts_asks`, `pending_asks`, `last_intercom_activity`, and `last_seen`. Peer rows include live delivery guidance for `ask`, `send`, `queue`, `steer`, and the discouraged passive path; the self row says self-target delivery is unavailable and points to peer targets / `pending` / `reply`. Status is derived automatically from Pi lifecycle events: `idle`, `thinking`, or `tool:<name>`. If multiple sessions have the same name, use the displayed target exactly as shown, for example `to: "ca7bfec2"`. The target may be longer than eight characters when needed to avoid collisions.
 
 **`send`** — Sends a non-blocking message to the specified session. It wakes idle recipients by default and returns broker acceptance, not a later response. Omit `delivery` for the default safe path: active interactive recipients are idle-gated before wake. Use `delivery:"queue"` to hand the message to Pi's native follow-up queue, `delivery:"steer"` only to course-correct active work, and `delivery:"passive"`/`passive:true` only for human-visible breadcrumbs. `queueMode:"replace"` with a `threadId` replaces older undelivered intercom-staged messages for that thread after a short coalescing window; once a message is handed to Pi's native queue it cannot be keyed-replaced. Set `confirmSend: true` in config if you want a confirmation dialog for non-reply sends. Replies that include `replyTo` skip confirmation.
 
@@ -373,7 +376,7 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 
 **`pending`** — Lists unresolved inbound asks with sender, message ID, elapsed time, and a short preview. For `pi-subagents` supervisor asks, the preview expands the run id, agent, child intercom target, and question so the parent can reply without guessing. Useful when replying after the original triggered turn.
 
-**`status`** — Shows connection status, session ID, and total count of active sessions (including the current session).
+**`status`** — Shows connection status, session ID, total active sessions, and the same live recipient capability rows as `list` so agents can choose `ask`, `queue`, `steer`, or avoid passive delivery without a second call.
 
 ## Keyboard Shortcuts
 

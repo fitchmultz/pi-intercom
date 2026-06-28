@@ -422,17 +422,35 @@ function formatDuration(seconds: number): string {
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
   return `${Math.floor(seconds / 3600)}h`;
 }
+function sessionBusyState(session: SessionInfo): "idle" | "busy" | "unknown" {
+  if (session.acceptsAsks === true) return "idle";
+  if (session.acceptsAsks === false) return "busy";
+  const status = session.status ?? "";
+  if (status === "idle" || status.startsWith("idle ") || status.startsWith("idle ·")) return "idle";
+  if (status === "thinking" || status.startsWith("thinking ") || status.startsWith("thinking ·") || status.startsWith("tool:")) return "busy";
+  return "unknown";
+}
+function formatIntercomAge(timestamp: number | undefined, now: number): string {
+  return typeof timestamp === "number" && timestamp > 0
+    ? `${formatDuration(Math.max(0, Math.floor((now - timestamp) / 1000)))} ago`
+    : "none";
+}
+function sessionDeliveryGuidance(session: SessionInfo, isSelf: boolean): string {
+  if (isSelf) return "self target unavailable; choose a peer from Other sessions; use pending/reply for inbound asks";
+  const state = sessionBusyState(session);
+  if (state === "idle") return "ask ok; send wakes; queue for follow-up; steer urgent only; passive discouraged";
+  if (session.acceptsAsks === false) return "send accepted; default ask returns peer_idle; use queue for normal follow-up, steer only to redirect; passive discouraged";
+  if (state === "busy") return "send accepted; default ask may wait; use queue for normal follow-up, steer only to redirect; passive discouraged";
+  return "state unknown; list target is valid; use ask for needed replies, queue for active follow-up, steer urgent only; passive discouraged";
+}
 function formatSessionListRow(session: SessionInfo, currentCwd: string, isSelf: boolean, duplicates = new Set<string>(), allSessions: SessionInfo[] = [session], now = Date.now()): string {
   const name = session.name || "Unnamed session";
   const duplicateName = Boolean(session.name && duplicates.has(session.name.toLowerCase()));
   const healthTags: string[] = [];
+  healthTags.push(`state:${sessionBusyState(session)}`);
   healthTags.push(`accepts_asks:${session.acceptsAsks === undefined ? "unknown" : session.acceptsAsks ? "true" : "false"}`);
   healthTags.push(`pending_asks:${typeof session.pendingAsks === "number" ? session.pendingAsks : "unknown"}`);
-  if (typeof session.lastIntercomActivity === "number" && session.lastIntercomActivity > 0) {
-    healthTags.push(`last_intercom_activity:${formatDuration(Math.max(0, Math.floor((now - session.lastIntercomActivity) / 1000)))} ago`);
-  } else {
-    healthTags.push("last_intercom_activity:none");
-  }
+  healthTags.push(`last_intercom_activity:${formatIntercomAge(session.lastIntercomActivity, now)}`);
   if (typeof session.lastSeen === "number") {
     healthTags.push(`last_seen:${formatDuration(Math.max(0, Math.floor((now - session.lastSeen) / 1000)))} ago`);
   }
@@ -444,7 +462,20 @@ function formatSessionListRow(session: SessionInfo, currentCwd: string, isSelf: 
   ].filter((tag): tag is string => Boolean(tag));
   const target = formatSessionTarget(session, allSessions);
   const suffix = tags.length ? ` [${tags.join(", ")}]` : "";
-  return `• ${name} (${target}) — ${session.cwd} (${session.model})${suffix}`;
+  return `• ${name} (${target}) — ${session.cwd} (${session.model})${suffix}\n  ↳ ${sessionDeliveryGuidance(session, isSelf)}`;
+}
+function formatSessionListSections(sessions: SessionInfo[], currentSessionId: string): string {
+  const currentSession = sessions.find(s => s.id === currentSessionId);
+  if (!currentSession) {
+    throw new Error("Current session is missing from intercom session list.");
+  }
+  const duplicates = duplicateSessionNames(sessions);
+  const otherSessions = sessions.filter(s => s.id !== currentSessionId);
+  const currentSection = `**Current session:**\n${formatSessionListRow(currentSession, currentSession.cwd, true, duplicates, sessions)}`;
+  const otherSection = otherSessions.length === 0
+    ? `**Other sessions:**\nNo other sessions connected. Start another intercom-enabled session with \`pi --name worker\`, then run \`intercom({ action: "list" })\` again. If you are dogfooding this local fork without installing it, start the peer with \`${localForkStartCommand()}\`.`
+    : `**Other sessions:**\n${otherSessions.map(s => formatSessionListRow(s, currentSession.cwd, false, duplicates, sessions)).join("\n")}`;
+  return `${currentSection}\n\n${otherSection}`;
 }
 function previewText(value: unknown, maxLength = 72): string | undefined {
   if (typeof value !== "string") {
@@ -1728,7 +1759,7 @@ Usage:
       }
       if (delivery === "passive" && action !== "send") {
         return {
-          content: [{ type: "text", text: "delivery='passive' is only valid for action='send'" }],
+          content: [{ type: "text", text: "delivery='passive' is only valid for action='send'. Passive delivery is for human-visible breadcrumbs and is discouraged for agent-to-agent coordination; use ask without passive when you need a reply." }],
           isError: true,
           details: { error: true },
         };
@@ -1765,7 +1796,7 @@ Usage:
       const cleanedThreadId = typeof threadId === "string" ? threadId.trim() : undefined;
       if (queueMode !== undefined && deliveryMode !== "queue") {
         return {
-          content: [{ type: "text", text: "'queueMode' is only valid with delivery='queue'" }],
+          content: [{ type: "text", text: "'queueMode' is only valid with delivery='queue'. Use delivery='queue' for normal active-recipient follow-up; use delivery='steer' only for urgent redirection; avoid passive for agent-to-agent coordination." }],
           isError: true,
           details: { error: true },
         };
@@ -1776,25 +1807,8 @@ Usage:
           try {
             const mySessionId = connectedClient.sessionId;
             const sessions = await connectedClient.listSessions();
-            const currentSession = sessions.find(s => s.id === mySessionId);
-            const otherSessions = sessions.filter(s => s.id !== mySessionId);
-
-            if (!currentSession) {
-              return {
-                content: [{ type: "text", text: "Current session is missing from intercom session list." }],
-                isError: true,
-                details: { error: true },
-              };
-            }
-
-            const duplicates = duplicateSessionNames(sessions);
-            const currentSection = `**Current session:**\n${formatSessionListRow(currentSession, currentSession.cwd, true, duplicates, sessions)}`;
-            const otherSection = otherSessions.length === 0
-              ? `**Other sessions:**\nNo other sessions connected. Start another intercom-enabled session with \`pi --name worker\`, then run \`intercom({ action: \"list\" })\` again. If you are dogfooding this local fork without installing it, start the peer with \`${localForkStartCommand()}\`.`
-              : `**Other sessions:**\n${otherSessions.map(s => formatSessionListRow(s, currentSession.cwd, false, duplicates, sessions)).join("\n")}`;
-
             return {
-              content: [{ type: "text", text: `${currentSection}\n\n${otherSection}` }],
+              content: [{ type: "text", text: formatSessionListSections(sessions, mySessionId) }],
               isError: false,
             };
           } catch (error) {
@@ -2108,7 +2122,7 @@ Usage:
             return {
               content: [{
                 type: "text",
-                text: `**Intercom Status:**\nConnected: Yes\nSession ID: ${mySessionId}\nActive sessions: ${sessions.length}`,
+                text: `**Intercom Status:**\nConnected: Yes\nSession ID: ${mySessionId}\nActive sessions: ${sessions.length}\n\n${formatSessionListSections(sessions, mySessionId)}`,
               }],
               isError: false,
             };

@@ -139,7 +139,7 @@ export class ComposeOverlay implements Component {
         expectsReply,
       });
       
-      if (!result.delivered) {
+      if (!result.accepted) {
         this.error = result.reason ?? "Message not delivered. Session may not exist or has disconnected.";
         this.sending = false;
         this.tui.requestRender();
@@ -172,7 +172,7 @@ export class ComposeOverlay implements Component {
     if (width < 3) return [truncateToWidth("Intercom", width)];
     const innerWidth = Math.min(width, 72);
     const contentWidth = Math.max(1, innerWidth - 2);
-    const footer = `${this.keybindings.getKeys("tui.select.confirm").join("/")}: ${this.mode === "ask" ? "Ask" : "Send"} • Tab: ${this.mode === "ask" ? "Send mode" : "Ask mode"} • ${this.keybindings.getKeys("tui.select.cancel").join("/")}: Close`;
+    const footer = `${this.keybindings.getKeys("tui.select.confirm").join("/")}: ${this.mode === "ask" ? "Request reply" : "Send"} • Tab: ${this.mode === "ask" ? "Send mode" : "Request-reply mode"} • ${this.keybindings.getKeys("tui.select.cancel").join("/")}: Close`;
     const border = (text: string) => this.theme.fg("accent", text);
     const row = (text = "") => {
       const clipped = truncateToWidth(text, contentWidth, "", true);
@@ -181,7 +181,7 @@ export class ComposeOverlay implements Component {
 
     const lines: string[] = [];
     lines.push(border(`╭${"─".repeat(contentWidth)}╮`));
-    lines.push(row(this.theme.bold(` ${this.mode === "ask" ? "Ask" : "Send"} to: ${this.targetLabel}`)));
+    lines.push(row(this.theme.bold(` ${this.mode === "ask" ? "Request reply" : "Send"} to: ${this.targetLabel}`)));
     lines.push(row(this.theme.fg("dim", ` ${this.target.cwd} • ${this.target.model}`)));
     lines.push(border(`├${"─".repeat(contentWidth)}┤`));
     lines.push(row());

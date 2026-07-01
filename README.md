@@ -83,7 +83,7 @@ Press **Alt+M** or type `/intercom` to open the session list overlay:
 
 1. **Select a session** — Use arrow keys to pick a target session
 2. **Compose message** — Write your message in the compose overlay. Pasted multiline handoffs are preserved.
-3. **Choose mode** — Press Tab to toggle between Send and Ask mode, which adds a reply hint for the recipient
+3. **Choose mode** — Press Tab to toggle between Send and Request Reply mode. Request Reply marks the message as needing a reply and adds the recipient reply hint; the overlay itself does not wait for or collect that reply.
 4. **Send** — Press Enter to send, Escape to cancel
 
 ### From the Agent
@@ -228,7 +228,7 @@ This matters because the agent receiving the message doesn't need to reconstruct
 
 ### `send` vs `ask`
 
-`send` is non-blocking — the tool returns after the broker accepts the message for delivery and does not return any later response. It wakes idle recipients by default; active recipients may see the message after the current tool call or when idle. Use `ask` with `delivery:"steer"` or `delivery:"queue"` for active-recipient coordination that needs a reply in the same workflow. `send` supports `delivery:"queue"` for active-recipient follow-up, `delivery:"steer"` for urgent one-way course correction, and passive delivery for human-visible breadcrumbs only; avoid passive delivery for agent-to-agent coordination. If you want an approval dialog before non-reply sends, set `confirmSend: true` in config. Replies that include `replyTo` still skip confirmation so reply-hint flows can continue without an extra approval step.
+`send` is non-blocking — the tool returns after the broker either delivers to a live recipient or reports that replace-mode delivery is queued, and it does not return any later response. It wakes idle recipients by default; active recipients may see the message after the current tool call or when idle. Use `ask` with `delivery:"steer"` or `delivery:"queue"` for active-recipient coordination that needs a reply in the same workflow. `send` supports `delivery:"queue"` for active-recipient follow-up, `delivery:"steer"` for urgent one-way course correction, and passive delivery for human-visible breadcrumbs only; avoid passive delivery for agent-to-agent coordination. If you want an approval dialog before non-reply sends, set `confirmSend: true` in config. Replies that include `replyTo` still skip confirmation so reply-hint flows can continue without an extra approval step.
 
 `ask` sends the message and waits up to `askTimeoutMs` (default 2 minutes). If the peer publishes `accepts_asks:false`, a default ask is still delivered but the tool returns promptly with `delivered:true`, `replied:false`, and `reason:"peer_idle"` instead of burning the full timeout. Explicit `delivery:"queue"` or `delivery:"steer"` asks keep waiting for a reply because the caller deliberately chose an active-recipient path. The peer can reply later as a normal intercom message.
 
@@ -384,7 +384,7 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 |-----|--------|
 | Alt+M | Open session list overlay |
 | ↑/↓ | Navigate session list |
-| Tab | Toggle Send / Ask mode in the compose overlay |
+| Tab | Toggle Send / Request Reply mode in the compose overlay |
 | Enter | Select session / Send or ask |
 | Escape | Cancel / Close overlay |
 

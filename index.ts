@@ -599,6 +599,11 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   function rejectReplyWaiter(error: Error): void {
     replyWaiter?.reject(error);
   }
+  function rejectReplyWaiterForPeer(sessionId: string): void {
+    if (replyWaiter?.from === sessionId) {
+      rejectReplyWaiter(new Error(`Reply peer disconnected before answering: ${sessionId}`));
+    }
+  }
   function clearReconnectTimer(): void {
     if (!reconnectTimer) {
       return;
@@ -981,6 +986,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       if (client !== nextClient) {
         return;
       }
+      rejectReplyWaiterForPeer(sessionId);
       replyTracker.expireSender(sessionId);
       for (let index = pendingIdleMessages.length - 1; index >= 0; index -= 1) {
         const pending = pendingIdleMessages[index];
@@ -1193,7 +1199,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       try {
         const result = await activeClient.send(target, { text: parsed.message });
         if (!relayStillLive()) return;
-        if (!result.delivered) {
+        if (!result.accepted) {
           const error = new Error(result.reason ?? "Session may not exist or has disconnected.");
           recordSubagentDeliveryError(options.errorEntryType, parsed.to, parsed.message, error);
           if (options.acknowledge) emitResultDelivery(parsed.requestId, false, error);
@@ -1518,12 +1524,12 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
               queueMode: "replace",
               threadId: `subagent-progress:${metadata.runId}:${metadata.agent}:${metadata.index}`,
             });
-            if (!result.delivered) {
+            if (!result.accepted) {
               const errorText = result.reason ?? "Session may not exist or has disconnected.";
               return {
                 content: [{ type: "text", text: `Message to "${metadata.orchestratorTarget}" was not delivered: ${errorText}` }],
                 isError: true,
-                details: { messageId: result.id, delivered: false, reason: result.reason },
+                details: { messageId: result.id, accepted: result.accepted, delivered: false, reason: result.reason },
               };
             }
             markIntercomActivity();
@@ -1536,9 +1542,9 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
               subagent: { runId: metadata.runId, agent: metadata.agent, index: metadata.index },
             });
             return {
-              content: [{ type: "text", text: `Progress update sent to supervisor ${metadata.orchestratorTarget}` }],
+              content: [{ type: "text", text: result.queued ? `Progress update queued for supervisor ${metadata.orchestratorTarget}` : `Progress update sent to supervisor ${metadata.orchestratorTarget}` }],
               isError: false,
-              details: { messageId: result.id, delivered: true },
+              details: { messageId: result.id, accepted: result.accepted, delivered: result.delivered, queued: result.queued === true },
             };
           } catch (error) {
             return {
@@ -1583,7 +1589,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
             text: requestText,
             expectsReply: true,
           });
-          if (!sendResult.delivered) {
+          if (!sendResult.accepted) {
             const errorText = sendResult.reason ?? "Session may not exist or has disconnected.";
             if (replyPromise) {
               rejectReplyWaiter(new Error(`Message to "${metadata.orchestratorTarget}" was not delivered: ${errorText}`));
@@ -1667,9 +1673,9 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         if (isPartial) {
           return new Text(theme.fg("warning", "Waiting for supervisor..."), 0, 0);
         }
-        const details = result.details as { delivered?: boolean; error?: boolean; messageId?: string; reason?: string; structuredReplyParseError?: string } | undefined;
+        const details = result.details as { accepted?: boolean; delivered?: boolean; queued?: boolean; error?: boolean; messageId?: string; reason?: string; structuredReplyParseError?: string } | undefined;
         const textContent = firstTextContent(result);
-        const failed = Boolean(context.isError || details?.error === true || details?.delivered === false);
+        const failed = Boolean(context.isError || details?.error === true || details?.accepted === false);
         const parseWarning = typeof details?.structuredReplyParseError === "string";
         let text = failed
           ? theme.fg("error", "✗ ")
@@ -1859,12 +1865,12 @@ Usage:
               threadId: cleanedThreadId,
               passive: passive === true,
             });
-            if (!result.delivered) {
+            if (!result.accepted) {
               const errorText = result.reason ?? "Session may not exist or has disconnected.";
               return {
                 content: [{ type: "text", text: `Message to "${to}" was not delivered: ${errorText}` }],
                 isError: true,
-                details: { messageId: result.id, delivered: false, reason: result.reason },
+                details: { messageId: result.id, accepted: result.accepted, delivered: false, reason: result.reason },
               };
             }
             markIntercomActivity();
@@ -1888,9 +1894,9 @@ Usage:
                     ? " (queued for active recipient; use `ask` when you need a reply)"
                     : " (accepted; wakes idle recipients; active recipients may see it after the current tool call or when idle; use ask+delivery:'steer' when you need a live reply)";
             return {
-              content: [{ type: "text", text: `Message sent to ${to}${replyModeHint}` }],
+              content: [{ type: "text", text: result.queued ? `Message queued for ${to} (${result.reason ?? "queued"})` : `Message sent to ${to}${replyModeHint}` }],
               isError: false,
-              details: { messageId: result.id, delivered: true },
+              details: { messageId: result.id, accepted: result.accepted, delivered: result.delivered, queued: result.queued === true },
             };
           } catch (error) {
             return {
@@ -1968,7 +1974,7 @@ Usage:
               threadId: cleanedThreadId,
             });
 
-            if (!sendResult.delivered) {
+            if (!sendResult.accepted) {
               const errorText = sendResult.reason ?? "Session may not exist or has disconnected.";
               if (replyPromise) {
                 rejectReplyWaiter(new Error(`Message to "${to}" was not delivered: ${errorText}`));
@@ -2062,12 +2068,12 @@ Usage:
               text: message,
               replyTo: target.message.id,
             });
-            if (!result.delivered) {
+            if (!result.accepted) {
               const errorText = result.reason ?? "Session may not exist or has disconnected.";
               return {
                 content: [{ type: "text", text: `Reply to "${target.from.name || target.from.id}" was not delivered: ${errorText}` }],
                 isError: true,
-                details: { messageId: result.id, delivered: false, reason: result.reason },
+                details: { messageId: result.id, accepted: result.accepted, delivered: false, queued: result.queued === true, reason: result.reason },
               };
             }
             replyTracker.markReplied(target.message.id);
@@ -2166,8 +2172,8 @@ Usage:
       if (isPartial) {
         return new Text(theme.fg("warning", "Intercom working..."), 0, 0);
       }
-      const details = result.details as { delivered?: boolean; error?: boolean; messageId?: string; reason?: string } | undefined;
-      const failed = Boolean(context.isError || details?.error === true || details?.delivered === false);
+      const details = result.details as { accepted?: boolean; delivered?: boolean; queued?: boolean; error?: boolean; messageId?: string; reason?: string } | undefined;
+      const failed = Boolean(context.isError || details?.error === true || details?.accepted === false);
       let text = failed ? theme.fg("error", "✗ ") : theme.fg("success", "✓ ");
       text += theme.fg(failed ? "error" : "text", firstTextContent(result));
       if (details?.messageId && !context.expanded) {

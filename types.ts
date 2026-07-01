@@ -161,4 +161,5 @@ export type BrokerMessage =
   | { type: "session_left"; sessionId: string }
   | { type: "error"; error: string }
   | { type: "delivered"; messageId: string }
+  | { type: "delivery_queued"; messageId: string; reason: string }
   | { type: "delivery_failed"; messageId: string; reason: string };

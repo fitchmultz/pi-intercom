@@ -34,6 +34,7 @@ process.env.HOME = sharedHomeDir;
 process.env.USERPROFILE = sharedHomeDir;
 process.env.PI_CODING_AGENT_DIR = sharedAgentDir;
 const { IntercomClient } = await import("./broker/client.ts");
+const { MAX_FRAME_SIZE_BYTES } = await import("./broker/framing.ts");
 const { getBrokerSocketPath } = await import("./broker/paths.ts");
 process.on("exit", () => {
   for (const broker of activeBrokers) signalBroker(broker, "SIGKILL");
@@ -643,6 +644,56 @@ test("plain sends wake by default, passive sends do not, and only asks show repl
   }
 });
 
+test("broker returns a clean delivery failure when forwarding would exceed the frame cap", { concurrency: false }, async () => {
+  const broker = await setupBroker();
+  const sender = new IntercomClient({ sendTimeoutMs: 2000 });
+  const receiver = new IntercomClient({ sendTimeoutMs: 2000 });
+
+  try {
+    await sender.connect({
+      name: "large-sender",
+      cwd: "c".repeat(300_000),
+      model: "m".repeat(100_000),
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    });
+    await receiver.connect({
+      name: "large-receiver",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    });
+
+    const result = await sender.send(receiver.sessionId!, {
+      messageId: "too-large-forward",
+      text: "x".repeat(Math.max(1, MAX_FRAME_SIZE_BYTES - 350_000)),
+    });
+
+    assert.equal(result.delivered, false);
+    assert.match(result.reason ?? "", /message too large/i);
+
+    const queuedResult = await sender.send(receiver.sessionId!, {
+      messageId: "too-large-queued-forward",
+      text: "x".repeat(Math.max(1, MAX_FRAME_SIZE_BYTES - 350_000)),
+      expectsReply: true,
+      delivery: "queue",
+      queueMode: "replace",
+      threadId: "too-large-forward",
+    });
+    assert.equal(queuedResult.delivered, false);
+    assert.equal(queuedResult.queued, undefined);
+    assert.match(queuedResult.reason ?? "", /message too large/i);
+    assert.equal(sender.isConnected(), true);
+  } finally {
+    await sender.disconnect().catch(() => undefined);
+    await receiver.disconnect().catch(() => undefined);
+    await stopBroker(broker);
+  }
+});
+
 test("intercom send passive opt-in is exposed through the public tool", { concurrency: false }, async () => {
   const { planner, cleanup } = await setupClients();
   const { default: piIntercomExtension } = await import("./index.ts");
@@ -923,6 +974,46 @@ test("intercom ask treats failure-like normal reply text as a successful reply",
   }
 });
 
+test("intercom ask rejects promptly when the reply peer disconnects", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { cleanup } = await setupClients();
+  const worker = new IntercomClient();
+  const harness = createExtensionHarness("ask-disconnect-controller", { hasUI: true });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    await worker.connect({
+      name: "disconnecting-peer",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    });
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const askReceived = once(worker, "message") as Promise<[SessionInfo, Message]>;
+    const resultPromise = intercomTool.execute("ask-peer-disconnect", {
+      action: "ask",
+      to: "disconnecting-peer",
+      message: "Will you vanish?",
+    }, new AbortController().signal, undefined, harness.ctx);
+    await askReceived;
+    await worker.disconnect();
+
+    const result = await Promise.race([
+      resultPromise,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("ask did not reject promptly")), 1000)),
+    ]);
+    assert.equal(result.isError, true);
+    assert.match(result.content[0]?.text ?? "", /Reply peer disconnected before answering/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await worker.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
 test("non-error assistant messages do not propagate recipient failure replies", { concurrency: false }, async () => {
   const { planner, cleanup } = await setupClients();
   const { default: piIntercomExtension } = await import("./index.ts");
@@ -1086,7 +1177,7 @@ test("intercom tool accepts displayed short IDs when session names are duplicate
   }
 });
 
-test("compose overlay preserves pasted multiline handoffs and can send ask-mode messages", async () => {
+test("compose overlay preserves pasted multiline handoffs and can send request-reply messages", async () => {
   const sent: Array<{ to: string; text: string; expectsReply: boolean | undefined }> = [];
   let renderRequests = 0;
   let doneResult: unknown;
@@ -1111,7 +1202,7 @@ test("compose overlay preserves pasted multiline handoffs and can send ask-mode 
     "worker",
     { send: async (to: string, options: { text: string; expectsReply: boolean }) => {
       sent.push({ to, text: options.text, expectsReply: options.expectsReply });
-      return { id: "message-1", delivered: true };
+      return { id: "message-1", accepted: true, delivered: true };
     } } as never,
     (result) => { doneResult = result; },
   );
@@ -1119,7 +1210,7 @@ test("compose overlay preserves pasted multiline handoffs and can send ask-mode 
   overlay.handleInput("\x1b[200~\tLine 1\n\tLine 2\n\x1b[201~");
   overlay.handleInput("\t");
   const rendered = overlay.render(100).join("\n");
-  assert.match(rendered, /Ask to: worker/);
+  assert.match(rendered, /Request reply to: worker/);
   assert.match(rendered, /Line 1/);
   assert.match(rendered, /Line 2/);
 
@@ -1140,7 +1231,7 @@ test("compose overlay preserves pasted multiline handoffs and can send ask-mode 
     "worker",
     { send: async (to: string, options: { text: string; expectsReply: boolean }) => {
       sent.push({ to, text: options.text, expectsReply: options.expectsReply });
-      return { id: "message-2", delivered: true };
+      return { id: "message-2", accepted: true, delivered: true };
     } } as never,
     (result) => { doneResult = result; },
   );
@@ -1163,7 +1254,7 @@ test("compose overlay preserves pasted multiline handoffs and can send ask-mode 
     "worker",
     { send: async (to: string, options: { text: string; expectsReply: boolean }) => {
       sent.push({ to, text: options.text, expectsReply: options.expectsReply });
-      return { id: "message-3", delivered: true };
+      return { id: "message-3", accepted: true, delivered: true };
     } } as never,
     () => undefined,
   );
@@ -1619,20 +1710,20 @@ test("replace queue mode coalesces quick idle updates before waking", { concurre
     await harness.emitLifecycle("session_start");
     const target = await waitForSessionByName(planner, "idle-replace-worker");
 
-    assert.equal((await planner.send(target.id, {
+    assert.deepEqual(await planner.send(target.id, {
       messageId: "idle-old",
       text: "OLD idle replacement.",
       delivery: "queue",
       queueMode: "replace",
       threadId: "idle-race",
-    })).delivered, true);
-    assert.equal((await planner.send(target.id, {
+    }), { id: "idle-old", accepted: true, delivered: false, queued: true, reason: "Queued for replace-mode delivery" });
+    assert.deepEqual(await planner.send(target.id, {
       messageId: "idle-final",
       text: "FINAL idle replacement.",
       delivery: "queue",
       queueMode: "replace",
       threadId: "idle-race",
-    })).delivered, true);
+    }), { id: "idle-final", accepted: true, delivered: false, queued: true, reason: "Queued for replace-mode delivery" });
 
     await new Promise((resolve) => setTimeout(resolve, 300));
     assert.equal(harness.sentMessages.length, 0);
@@ -1657,6 +1748,8 @@ test("broker-staged replace delivery survives sender disconnect", { concurrency:
 
   try {
     assert.ok(orchestrator.sessionId);
+    orchestrator.updatePresence({ status: "idle", acceptsAsks: true });
+    await waitForSessionStatus(planner, "orchestrator", "idle");
     const result = await planner.send(orchestrator.sessionId, {
       messageId: "replace-disconnect",
       text: "Deliver after sender disconnects.",
@@ -1664,7 +1757,7 @@ test("broker-staged replace delivery survives sender disconnect", { concurrency:
       queueMode: "replace",
       threadId: "disconnect-window",
     });
-    assert.equal(result.delivered, true);
+    assert.deepEqual(result, { id: "replace-disconnect", accepted: true, delivered: false, queued: true, reason: "Queued for replace-mode delivery" });
 
     await planner.disconnect();
     await new Promise((resolve) => setTimeout(resolve, 1800));
@@ -1694,7 +1787,7 @@ test("broker-staged replace asks are dropped when sender disconnects", { concurr
       queueMode: "replace",
       threadId: "disconnect-ask-window",
     });
-    assert.equal(result.delivered, true);
+    assert.deepEqual(result, { id: "replace-ask-disconnect", accepted: true, delivered: false, queued: true, reason: "Queued for replace-mode delivery" });
 
     await planner.disconnect();
     await new Promise((resolve) => setTimeout(resolve, 1800));
@@ -1804,22 +1897,22 @@ test("replace queue mode also removes older undelivered asks from pending state"
     await harness.emitLifecycle("session_start");
     const target = await waitForSessionByName(planner, "replace-ask-worker");
 
-    assert.equal((await planner.send(target.id, {
+    assert.deepEqual(await planner.send(target.id, {
       messageId: "replace-ask-old",
       text: "Old question?",
       expectsReply: true,
       delivery: "queue",
       queueMode: "replace",
       threadId: "decision",
-    })).delivered, true);
-    assert.equal((await planner.send(target.id, {
+    }), { id: "replace-ask-old", accepted: true, delivered: false, queued: true, reason: "Queued for replace-mode delivery" });
+    assert.deepEqual(await planner.send(target.id, {
       messageId: "replace-ask-new",
       text: "New question?",
       expectsReply: true,
       delivery: "queue",
       queueMode: "replace",
       threadId: "decision",
-    })).delivered, true);
+    }), { id: "replace-ask-new", accepted: true, delivered: false, queued: true, reason: "Queued for replace-mode delivery" });
 
     await new Promise((resolve) => setTimeout(resolve, 1800));
     assert.equal(harness.sentMessages.length, 0);
@@ -2372,6 +2465,40 @@ test("child supervisor tool resolves target and includes run metadata", { concur
       await harness.emitLifecycle("session_shutdown");
     });
   } finally {
+    await cleanup();
+  }
+});
+
+test("contact supervisor rejects promptly when the supervisor disconnects before replying", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { orchestrator, cleanup } = await setupClients();
+
+  try {
+    await withChildOrchestratorEnv({
+      orchestratorTarget: "orchestrator",
+      runId: "78f659a3",
+      agent: "worker",
+      index: "0",
+    }, async () => {
+      const harness = createExtensionHarness("subagent-disconnect-worker");
+      piIntercomExtension(harness.pi as never);
+      await harness.emitLifecycle("session_start");
+      const supervisorTool = harness.tools.find((tool) => tool.name === "contact_supervisor")!;
+      const askReceived = once(orchestrator, "message") as Promise<[SessionInfo, Message]>;
+      const resultPromise = supervisorTool.execute("ask-disconnect", { reason: "need_decision", message: "Which path?" }, new AbortController().signal, undefined, harness.ctx);
+      await askReceived;
+      await orchestrator.disconnect();
+
+      const result = await Promise.race([
+        resultPromise,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("supervisor wait did not reject promptly")), 1000)),
+      ]);
+      assert.equal(result.isError, true);
+      assert.match(result.content[0]?.text ?? "", /Reply peer disconnected before answering/);
+      await harness.emitLifecycle("session_shutdown");
+    });
+  } finally {
+    await orchestrator.disconnect().catch(() => undefined);
     await cleanup();
   }
 });

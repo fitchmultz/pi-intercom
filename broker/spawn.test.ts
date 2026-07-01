@@ -10,6 +10,7 @@ import {
   getWindowsHiddenLauncherScript,
   getWindowsBrokerCommandLine,
   getWindowsHiddenLauncherPath,
+  stopUnhealthyBrokerBeforeSpawn,
 } from "./spawn.js";
 
 test("getTsxCliPath points at local tsx cli", () => {
@@ -107,4 +108,45 @@ test("getBrokerSpawnOptions keeps portable defaults on non-Windows platforms", (
   assert.equal(options.detached, true);
   assert.equal(options.stdio, "ignore");
   assert.equal(options.cwd, "/repo");
+});
+
+test("spawn guard fails loud instead of killing a live unhealthy broker PID", async () => {
+  const intercomDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-"));
+  const pidPath = path.join(intercomDir, "broker.pid");
+  const signals: Array<NodeJS.Signals | 0> = [];
+  const kill = ((_: number, signal?: NodeJS.Signals | 0) => {
+    signals.push(signal ?? "SIGTERM");
+    return true;
+  }) as typeof process.kill;
+
+  try {
+    await import("node:fs").then(({ writeFileSync }) => writeFileSync(pidPath, "12345"));
+    await assert.rejects(
+      () => stopUnhealthyBrokerBeforeSpawn(pidPath, async () => false, kill),
+      /refusing to spawn a second broker/,
+    );
+    assert.deepEqual(signals, [0]);
+  } finally {
+    rmSync(intercomDir, { recursive: true, force: true });
+  }
+});
+
+test("spawn guard treats EPERM as a live unhealthy broker PID and fails loud", async () => {
+  const intercomDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-"));
+  const pidPath = path.join(intercomDir, "broker.pid");
+  const kill = ((_: number) => {
+    const error = new Error("alive but not owned") as NodeJS.ErrnoException;
+    error.code = "EPERM";
+    throw error;
+  }) as typeof process.kill;
+
+  try {
+    await import("node:fs").then(({ writeFileSync }) => writeFileSync(pidPath, "12345"));
+    await assert.rejects(
+      () => stopUnhealthyBrokerBeforeSpawn(pidPath, async () => false, kill),
+      /refusing to spawn a second broker/,
+    );
+  } finally {
+    rmSync(intercomDir, { recursive: true, force: true });
+  }
 });

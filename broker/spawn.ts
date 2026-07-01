@@ -153,6 +153,7 @@ export async function spawnBrokerIfNeeded(brokerCommand: string, brokerArgs: str
     if (await isBrokerRunning()) {
       return;
     }
+    await stopUnhealthyBrokerBeforeSpawn();
 
     const brokerPath = join(dirname(fileURLToPath(import.meta.url)), "broker.ts");
     const launch = getBrokerLaunchSpec(brokerPath, brokerCommand, brokerArgs);
@@ -201,21 +202,36 @@ export async function spawnBrokerIfNeeded(brokerCommand: string, brokerArgs: str
 }
 
 async function isBrokerRunning(): Promise<boolean> {
-  if (await checkSocketConnectable()) {
-    return true;
-  }
+  return checkSocketConnectable();
+}
 
-  if (!existsSync(BROKER_PID)) return false;
-
+function readLivePid(pidPath = BROKER_PID, kill: typeof process.kill = process.kill): number | null {
+  if (!existsSync(pidPath)) return null;
+  let raw: string;
   try {
-    const pid = parseInt(readFileSync(BROKER_PID, "utf-8").trim(), 10);
-    if (!Number.isFinite(pid)) return false;
-    process.kill(pid, 0);
-    return checkSocketConnectable();
+    raw = readFileSync(pidPath, "utf-8");
   } catch {
-    // Missing or unreadable PID state means there is no live broker to reuse.
-    return false;
+    return null;
   }
+  const pid = parseInt(raw.trim(), 10);
+  if (!Number.isFinite(pid) || pid <= 0) return null;
+  try {
+    kill(pid, 0);
+    return pid;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM" ? pid : null;
+  }
+}
+
+export async function stopUnhealthyBrokerBeforeSpawn(
+  pidPath = BROKER_PID,
+  socketConnectable: () => Promise<boolean> = checkSocketConnectable,
+  kill: typeof process.kill = process.kill,
+): Promise<void> {
+  if (await socketConnectable()) return;
+  const pid = readLivePid(pidPath, kill);
+  if (pid === null) return;
+  throw new Error(`Intercom broker PID ${pid} is alive but socket is unhealthy; refusing to spawn a second broker. Stop that process or remove the stale pid file, then retry.`);
 }
 
 function checkSocketConnectable(): Promise<boolean> {

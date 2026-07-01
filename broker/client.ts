@@ -32,9 +32,11 @@ interface SendOptions {
   messageId?: string;
 }
 
-interface SendResult {
+export interface SendResult {
   id: string;
+  accepted: boolean;
   delivered: boolean;
+  queued?: boolean;
   reason?: string;
 }
 
@@ -320,7 +322,24 @@ export class IntercomClient extends EventEmitter {
         }
 
         this.pendingSends.delete(messageId);
-        pending.resolve({ id: messageId, delivered: true });
+        pending.resolve({ id: messageId, accepted: true, delivered: true });
+        break;
+      }
+
+      case "delivery_queued": {
+        const { messageId, reason } = brokerMessage;
+        if (typeof messageId !== "string" || typeof reason !== "string") {
+          throw new Error("Invalid delivery_queued message");
+        }
+
+        const pending = this.pendingSends.get(messageId);
+        if (!pending) {
+          // Late send responses are harmless once the caller has already timed out.
+          return;
+        }
+
+        this.pendingSends.delete(messageId);
+        pending.resolve({ id: messageId, accepted: true, delivered: false, queued: true, reason });
         break;
       }
 
@@ -337,7 +356,7 @@ export class IntercomClient extends EventEmitter {
         }
 
         this.pendingSends.delete(messageId);
-        pending.resolve({ id: messageId, delivered: false, reason });
+        pending.resolve({ id: messageId, accepted: false, delivered: false, reason });
         break;
       }
 

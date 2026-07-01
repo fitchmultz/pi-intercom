@@ -1,10 +1,25 @@
 import type { Socket } from "net";
 
+export const MAX_FRAME_SIZE_BYTES = 1024 * 1024;
+
+export function intercomMessageSizeBytes(msg: unknown): number {
+  return Buffer.byteLength(JSON.stringify(msg), "utf-8");
+}
+
+export function validateIntercomMessageSize(msg: unknown): Error | null {
+  const size = intercomMessageSizeBytes(msg);
+  return size > MAX_FRAME_SIZE_BYTES
+    ? new Error(`Intercom message too large (${size} bytes; max ${MAX_FRAME_SIZE_BYTES})`)
+    : null;
+}
+
 /**
  * Write a length-prefixed message to a socket.
  * Format: 4-byte big-endian length + JSON payload
  */
 export function writeMessage(socket: Socket, msg: unknown): void {
+  const tooLarge = validateIntercomMessageSize(msg);
+  if (tooLarge) throw tooLarge;
   const json = JSON.stringify(msg);
   const payload = Buffer.from(json, "utf-8");
   const header = Buffer.alloc(4);
@@ -28,6 +43,11 @@ export function createMessageReader(
 
     while (buffer.length >= 4) {
       const length = buffer.readUInt32BE(0);
+      if (length > MAX_FRAME_SIZE_BYTES) {
+        onError(new Error(`Intercom frame too large (${length} bytes; max ${MAX_FRAME_SIZE_BYTES})`));
+        buffer = Buffer.alloc(0);
+        return;
+      }
       
       if (buffer.length < 4 + length) {
         break;

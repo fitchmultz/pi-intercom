@@ -3,7 +3,7 @@ import { writeFileSync, unlinkSync, mkdirSync } from "fs";
 import { join } from "path";
 import { randomUUID } from "crypto";
 import { getPiAgentDir } from "../agent-dir.js";
-import { writeMessage, createMessageReader } from "./framing.js";
+import { writeMessage, createMessageReader, validateIntercomMessageSize } from "./framing.js";
 import { getBrokerSocketPath } from "./paths.js";
 import { isMessage } from "../types.js";
 import type { SessionInfo, Message, BrokerMessage } from "../types.js";
@@ -245,11 +245,19 @@ class IntercomBroker {
           const targetStatus = target.status ?? "";
           const targetIsIdle = targetStatus === "idle" || targetStatus.startsWith("idle ");
           if (message.delivery === "queue" && message.queueMode === "replace" && message.threadId && (message.expectsReply || (targetIsIdle && target.acceptsAsks !== false))) {
-            this.queueReplaceDelivery(currentId, target.id, fromSession.info, message);
-          } else {
-            this.deliverMessage(target.id, fromSession.info, message);
+            this.queueReplaceDelivery(socket, currentId, target.id, fromSession.info, message);
+            break;
           }
-          writeMessage(socket, { type: "delivered", messageId: message.id });
+          const deliveryFailure = this.deliverMessage(target.id, fromSession.info, message);
+          if (!deliveryFailure) {
+            writeMessage(socket, { type: "delivered", messageId: message.id });
+          } else {
+            writeMessage(socket, {
+              type: "delivery_failed",
+              messageId: message.id,
+              reason: deliveryFailure,
+            });
+          }
           break;
         }
 
@@ -342,12 +350,26 @@ class IntercomBroker {
     return `${fromId}\0${toId}\0${threadId}`;
   }
 
-  private queueReplaceDelivery(fromId: string, toId: string, from: SessionInfo, message: Message): void {
+  private queueReplaceDelivery(senderSocket: net.Socket, fromId: string, toId: string, from: SessionInfo, message: Message): void {
+    const validationError = this.validateDeliveryPayload(from, message);
+    if (validationError) {
+      writeMessage(senderSocket, {
+        type: "delivery_failed",
+        messageId: message.id,
+        reason: validationError,
+      });
+      return;
+    }
     const key = this.replaceKey(fromId, toId, message.threadId ?? "");
     const existing = this.pendingReplaceDeliveries.get(key);
     if (existing) {
       clearTimeout(existing.timer);
     }
+    writeMessage(senderSocket, {
+      type: "delivery_queued",
+      messageId: message.id,
+      reason: "Queued for replace-mode delivery",
+    });
     const timer = setTimeout(() => {
       this.pendingReplaceDeliveries.delete(key);
       this.deliverMessage(toId, from, message);
@@ -365,17 +387,28 @@ class IntercomBroker {
     }
   }
 
-  private deliverMessage(toId: string, from: SessionInfo, message: Message): void {
+  private validateDeliveryPayload(from: SessionInfo, message: Message): string | null {
+    return validateIntercomMessageSize({ type: "message", from, message })?.message ?? null;
+  }
+
+  private deliverMessage(toId: string, from: SessionInfo, message: Message): string | null {
     const target = this.sessions.get(toId);
-    if (!target) {
-      return;
+    if (!target || target.socket.destroyed || target.socket.writableEnded || !target.socket.writable) {
+      return "Recipient disconnected before delivery";
     }
+    const validationError = this.validateDeliveryPayload(from, message);
+    if (validationError) return validationError;
     this.touchActivity(toId, true);
-    writeMessage(target.socket, {
-      type: "message",
-      from,
-      message,
-    });
+    try {
+      writeMessage(target.socket, {
+        type: "message",
+        from,
+        message,
+      });
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
   }
 
   private findSessions(nameOrId: string): ConnectedSession[] {

@@ -159,7 +159,7 @@ For interview requests, reply with plain JSON or a fenced JSON block:
 
 `info` questions are context only and do not need response entries. Do not use supervisor contact for routine completion; child agents should return final results through `pi-subagents`.
 
-If a subagent status line advertises an intercom target, trust it only when that target appears in `intercom({ action: "list" })`. If absent, use child-side `contact_supervisor` or normal subagent controls. From a parent session, prefer `subagent({ action: "nudge", id, message })` for a non-blocking live child ping; use direct `intercom({ action: "ask", to, delivery: "steer", message })` when you need to wait for the child reply.
+If a subagent status line advertises an intercom target, trust it only when that target appears in `intercom({ action: "list" })`. If absent, use normal subagent controls (`status`, `resume`, `nudge`, result artifacts); the child may be Claude Code-backed or already exited and have no child-side `contact_supervisor`. From a parent session, prefer `subagent({ action: "nudge", id, message })` for a non-blocking live child ping; use direct `intercom({ action: "ask", to, delivery: "steer", message })` when you need to wait for a listed child reply.
 
 ## Optional visible peer sessions
 

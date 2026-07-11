@@ -1368,7 +1368,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     syncPresenceStatus();
     flushIdleMessages();
   });
-  pi.on("agent_end", () => {
+  pi.on("agent_settled", () => {
     if (!getLiveContext()) {
       return;
     }
@@ -1376,7 +1376,6 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     activeTools.clear();
     replyTracker.endAgent();
     syncPresenceStatus();
-    setTimeout(() => syncPresenceStatus(), 0).unref?.();
     scheduleInboundFlush(0);
   });
   pi.on("turn_start", (_event, ctx) => {

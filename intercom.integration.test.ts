@@ -863,7 +863,7 @@ test("recipient turn failures do not report after an ask is already replied", { 
   }
 });
 
-test("recipient turn failure propagation stops after agent_end", { concurrency: false }, async () => {
+test("recipient turn failure propagation stops after agent_settled", { concurrency: false }, async () => {
   const { planner, cleanup } = await setupClients();
   const { default: piIntercomExtension } = await import("./index.ts");
   const harness = createExtensionHarness("agent-ended-worker", { hasUI: true });
@@ -877,6 +877,7 @@ test("recipient turn failure propagation stops after agent_end", { concurrency: 
     await harness.emitLifecycle("turn_start");
     await harness.emitLifecycle("turn_end");
     await harness.emitLifecycle("agent_end");
+    await harness.emitLifecycle("agent_settled");
 
     let unexpectedFailureReply = false;
     const handler = (_from: SessionInfo, message: Message) => {
@@ -1347,15 +1348,10 @@ test("sessions publish automatic lifecycle status", { concurrency: false }, asyn
     await waitForSessionStatus(planner, "status-worker", "thinking");
 
     await harness.emitLifecycle("agent_end");
-    statusSession = await waitForSessionStatus(planner, "status-worker", "idle");
-    assert.equal(statusSession.acceptsAsks, false);
+    await waitForSessionStatus(planner, "status-worker", "thinking");
     contextIdle = true;
-    const deadline = Date.now() + 3000;
-    while (Date.now() < deadline) {
-      statusSession = await waitForSessionStatus(planner, "status-worker", "idle");
-      if (statusSession.acceptsAsks === true) break;
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
+    await harness.emitLifecycle("agent_settled");
+    statusSession = await waitForSessionStatus(planner, "status-worker", "idle");
     assert.equal(statusSession.acceptsAsks, true);
   } finally {
     await harness.emitLifecycle("session_shutdown");
@@ -1541,6 +1537,7 @@ test("busy interactive sessions idle-gate top-level asks without aborting", { co
 
     idle = true;
     await harness.emitLifecycle("agent_end");
+    await harness.emitLifecycle("agent_settled");
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     assert.equal(abortCount, 0);
@@ -1561,6 +1558,7 @@ test("busy interactive sessions idle-gate top-level asks without aborting", { co
 
     idle = true;
     await harness.emitLifecycle("agent_end");
+    await harness.emitLifecycle("agent_settled");
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(abortCount, 0);
     assert.equal(harness.sentMessages.length, 2);
@@ -1602,6 +1600,7 @@ test("busy interactive sessions flush queued sends and asks together while asks 
 
     idle = true;
     await harness.emitLifecycle("agent_end");
+    await harness.emitLifecycle("agent_settled");
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     assert.equal(harness.sentMessages.length, 2);
@@ -1685,6 +1684,7 @@ test("replace queue mode keeps only the latest undelivered message for a thread"
 
     idle = true;
     await harness.emitLifecycle("agent_end");
+    await harness.emitLifecycle("agent_settled");
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     assert.equal(harness.sentMessages.length, 1);
@@ -1826,6 +1826,7 @@ test("recipient-staged replace delivery survives sender disconnect before idle",
 
     idle = true;
     await harness.emitLifecycle("agent_end");
+    await harness.emitLifecycle("agent_settled");
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     assert.equal(harness.sentMessages.length, 1);
@@ -1871,6 +1872,7 @@ test("replace queue mode respects lifecycle busy state even when context idle la
 
     await harness.emitLifecycle("tool_execution_end", { toolCallId: "sleep", toolName: "bash" });
     await harness.emitLifecycle("agent_end");
+    await harness.emitLifecycle("agent_settled");
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     assert.equal(harness.sentMessages.length, 1);
@@ -1930,6 +1932,7 @@ test("replace queue mode also removes older undelivered asks from pending state"
 
     idle = true;
     await harness.emitLifecycle("agent_end");
+    await harness.emitLifecycle("agent_settled");
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     assert.equal(harness.sentMessages.length, 1);
@@ -1967,6 +1970,7 @@ test("busy passive delivery waits for idle without waking the model", { concurre
 
     idle = true;
     await harness.emitLifecycle("agent_end");
+    await harness.emitLifecycle("agent_settled");
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     assert.equal(harness.sentMessages.length, 1);
@@ -2015,6 +2019,7 @@ test("stale queued subagent progress updates are dropped", { concurrency: false 
 
     idle = true;
     await harness.emitLifecycle("agent_end");
+    await harness.emitLifecycle("agent_settled");
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     assert.equal(harness.sentMessages.length, 0);
@@ -2119,6 +2124,7 @@ test("busy interactive sessions request subagent detach before idle-gating super
 
     idle = true;
     await harness.emitLifecycle("agent_end");
+    await harness.emitLifecycle("agent_settled");
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     assert.equal(abortCount, 0);
@@ -2221,6 +2227,7 @@ test("queued inbound messages are discarded after shutdown", { concurrency: fals
     await harness.emitLifecycle("session_shutdown");
     idle = true;
     await harness.emitLifecycle("agent_end");
+    await harness.emitLifecycle("agent_settled");
     await new Promise((resolve) => setTimeout(resolve, 250));
 
     assert.equal(harness.sentMessages.length, 0);

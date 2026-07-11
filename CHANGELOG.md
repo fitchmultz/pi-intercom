@@ -10,12 +10,13 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 - Added `queueMode:"replace"` with `threadId` to replace older undelivered intercom-staged messages in the same thread before handing them to Pi.
 
 ### Changed
+- Updated the local Pi development baseline and compatibility imports for Pi 0.80.6.
 - `send` now wakes idle recipient agents by default and surfaces clearer guidance for active-recipient delivery; passive delivery is explicit via `delivery:"passive"` or legacy `passive:true` and discouraged for agent-to-agent coordination.
 
 ### Fixed
 - Busy non-interactive recipients now receive default non-reply sends after the current tool call, and queued replace-mode sends coalesce to the latest visible message instead of being dropped or delivered too late.
 - Stale queued subagent `progress_update` messages are now dropped instead of waking the supervisor after the foreground run already completed.
-- Presence now republishes ask availability after `agent_end` settles so idle sessions do not stay stuck at `accepts_asks:false`.
+- Presence now becomes idle on Pi's final `agent_settled` event, so retries, compaction retries, and queued continuations no longer advertise a session as idle early.
 - Queued replacement delivery now treats Pi lifecycle/tool state as busy even if the extension context idle flag lags, broker-stages replacements long enough for sequential same-thread updates to coalesce before waking the recipient, keeps accepted non-reply queued messages after the sender disconnects, and drops queued asks whose sender disconnected before delivery.
 - Explicit `ask` delivery modes (`delivery:"queue"`/`"steer"`) now wait for replies even when peer health reports `accepts_asks:false`, so intentional active-recipient nudges keep their blocking reply contract.
 

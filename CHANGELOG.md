@@ -5,6 +5,8 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 ## [Unreleased]
 
 ### Added
+- Added stable `reasonCode` and `nextActions` details for intercom delivery, ask timeout, reply-context, queue-validation, and recipient-turn failures while preserving existing result text and broker behavior.
+- Added a synchronous event bridge that exposes the current connected broker session ID to `pi-subagents`, allowing child supervisor messages to avoid ambiguous duplicate session names.
 - Added live `pi-subagents` event bridges so `subagent({ action: "nudge" })` can steer a registered child through `pi-intercom`, and `subagent status` can query best-effort child intercom health without importing this package.
 - Added explicit `delivery:"queue" | "steer" | "passive"` options for intercom messages. Stacked queued delivery maps to Pi native follow-up for active recipients, steering maps to Pi native steer, and passive delivery avoids waking the model.
 - Added `queueMode:"replace"` with `threadId` to replace older undelivered intercom-staged messages in the same thread before handing them to Pi.

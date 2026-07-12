@@ -19,6 +19,8 @@ import { registerSubagentLiveEventHandlers } from "./subagent-live-events.ts";
 const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
 const SUBAGENT_RESULT_INTERCOM_EVENT = "subagent:result-intercom";
 const SUBAGENT_RESULT_INTERCOM_DELIVERY_EVENT = "subagent:result-intercom-delivery";
+const SUBAGENT_INTERCOM_IDENTITY_REQUEST_EVENT = "subagent:intercom-identity-request";
+const SUBAGENT_INTERCOM_IDENTITY_RESPONSE_EVENT = "subagent:intercom-identity-response";
 const INTERCOM_DETACH_REQUEST_EVENT = "pi-intercom:detach-request";
 const INTERCOM_DETACH_RESPONSE_EVENT = "pi-intercom:detach-response";
 const INTERCOM_DETACH_RESPONSE_TIMEOUT_MS = 500;
@@ -83,6 +85,18 @@ function getErrorMessage(error: unknown): string {
 
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
+}
+
+type RecoveryAction = { action: "list" | "pending" | "send" | "status"; guidance?: string };
+
+function failureDetails(reasonCode: string, nextActions: RecoveryAction[], details: Record<string, unknown> = {}): Record<string, unknown> {
+  return { ...details, reasonCode, nextActions };
+}
+
+function replyFailureReason(message: string): "no_pending_reply" | "ambiguous_reply_target" | "reply_failed" {
+  if (message.startsWith("No active intercom context") || message.startsWith("No pending ask")) return "no_pending_reply";
+  if (message.startsWith("Multiple pending asks") || message.includes("too short")) return "ambiguous_reply_target";
+  return "reply_failed";
 }
 
 function getAssistantErrorMessage(message: unknown): string | null {
@@ -1227,6 +1241,12 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           return () => !runtimeStarted || Boolean(getLiveContext(runtimeContext, generation));
         },
       }),
+      pi.events.on(SUBAGENT_INTERCOM_IDENTITY_REQUEST_EVENT, (payload) => {
+        const requestId = payload && typeof payload === "object" ? (payload as { requestId?: unknown }).requestId : undefined;
+        if (typeof requestId === "string" && client?.isConnected() && client.sessionId) {
+          pi.events.emit(SUBAGENT_INTERCOM_IDENTITY_RESPONSE_EVENT, { requestId, sessionId: client.sessionId });
+        }
+      }),
       pi.events.on(SUBAGENT_CONTROL_INTERCOM_EVENT, (payload) => {
         relaySubagentIntercomPayload(payload, {
           sender: "subagent-control",
@@ -1770,7 +1790,7 @@ Usage:
         return {
           content: [{ type: "text", text: "'delivery', 'queueMode', and 'threadId' are only valid for action='send' or action='ask'" }],
           isError: true,
-          details: { error: true },
+          details: failureDetails(queueMode !== undefined || delivery === "queue" || threadId !== undefined ? "invalid_queue_arguments" : "invalid_delivery_arguments", [{ action: "send", guidance: "Use delivery options only with send or ask." }], { error: true }),
         };
       }
       if (passive === true && delivery !== undefined && delivery !== "passive") {
@@ -1784,14 +1804,14 @@ Usage:
         return {
           content: [{ type: "text", text: "'threadId' is only valid with queueMode='replace'" }],
           isError: true,
-          details: { error: true },
+          details: failureDetails("invalid_queue_arguments", [{ action: "send", guidance: "Use threadId only with delivery='queue' and queueMode='replace'." }], { error: true }),
         };
       }
       if (queueMode === "replace" && (!threadId || !threadId.trim())) {
         return {
           content: [{ type: "text", text: "queueMode='replace' requires a non-empty threadId" }],
           isError: true,
-          details: { error: true },
+          details: failureDetails("invalid_queue_arguments", [{ action: "send", guidance: "Provide a non-empty threadId with delivery='queue' and queueMode='replace'." }], { error: true }),
         };
       }
       const deliveryMode = (passive === true ? "passive" : delivery) as MessageDelivery | undefined;
@@ -1800,7 +1820,7 @@ Usage:
         return {
           content: [{ type: "text", text: "'queueMode' is only valid with delivery='queue'. Use delivery='queue' for normal active-recipient follow-up; use delivery='steer' only for urgent redirection; avoid passive for agent-to-agent coordination." }],
           isError: true,
-          details: { error: true },
+          details: failureDetails("invalid_queue_arguments", [{ action: "send", guidance: "Set delivery='queue', or omit queueMode and threadId." }], { error: true }),
         };
       }
 
@@ -1866,7 +1886,7 @@ Usage:
               return {
                 content: [{ type: "text", text: `Message to "${to}" was not delivered: ${errorText}` }],
                 isError: true,
-                details: { messageId: result.id, accepted: result.accepted, delivered: false, reason: result.reason },
+                details: failureDetails("delivery_failed", [{ action: "list" }, { action: "send", guidance: "Retry with an exact active recipient target." }], { messageId: result.id, accepted: result.accepted, delivered: false, reason: result.reason }),
               };
             }
             markIntercomActivity();
@@ -1892,13 +1912,13 @@ Usage:
             return {
               content: [{ type: "text", text: result.queued ? `Message queued for ${to} (${result.reason ?? "queued"})` : `Message sent to ${to}${replyModeHint}` }],
               isError: false,
-              details: { messageId: result.id, accepted: result.accepted, delivered: result.delivered, queued: result.queued === true },
+              details: { messageId: result.id, accepted: result.accepted, delivered: result.delivered, queued: result.queued === true, reasonCode: result.queued ? "message_queued" : "message_accepted" },
             };
           } catch (error) {
             return {
               content: [{ type: "text", text: `Failed to send: ${getErrorMessage(error)}` }],
               isError: true,
-              details: { error: true },
+              details: failureDetails(getErrorMessage(error).startsWith("Target ") ? "ambiguous_target" : "send_failed", [{ action: "list" }, { action: "send", guidance: "Retry with an exact active recipient target." }], { error: true }),
             };
           }
         }
@@ -1928,6 +1948,7 @@ Usage:
             };
           }
           let replyPromise: Promise<Message> | null = null;
+          let questionId: string | undefined;
 
           try {
             const sendTo = await resolveSessionTarget(connectedClient, to) ?? to;
@@ -1954,7 +1975,7 @@ Usage:
                 details: { error: true },
               };
             }
-            const questionId = randomUUID();
+            questionId = randomUUID();
             if (!peerIdle) {
               replyPromise = waitForReply(sendTo, questionId, _signal);
               replyPromise.catch(() => undefined);
@@ -1983,7 +2004,7 @@ Usage:
               return {
                 content: [{ type: "text", text: `Message to "${to}" was not delivered: ${errorText}` }],
                 isError: true,
-                details: { error: true },
+                details: failureDetails("delivery_failed", [{ action: "list" }, { action: "send", guidance: "Retry with an exact active recipient target." }], { error: true, messageId: sendResult.id, accepted: false, delivered: false, reason: sendResult.reason }),
               };
             }
             markIntercomActivity();
@@ -1999,7 +2020,7 @@ Usage:
               return {
                 content: [{ type: "text", text: `Delivered ask to ${to}; peer reports it is not accepting asks right now (peer_idle).` }],
                 isError: false,
-                details: { messageId: sendResult.id, delivered: true, replied: false, reason: "peer_idle" },
+                details: { messageId: sendResult.id, delivered: true, replied: false, reason: "peer_idle", reasonCode: "recipient_not_accepting_asks", nextActions: [{ action: "send", guidance: "Use queue for normal follow-up or steer only for urgent redirection." }] },
               };
             }
             const replyMessage = await replyPromise!;
@@ -2018,7 +2039,7 @@ Usage:
               return {
                 content: [{ type: "text", text: replyText }],
                 isError: true,
-                details: { error: true, recipientTurnFailed: true },
+                details: failureDetails("recipient_turn_failed", [{ action: "status" }, { action: "send", guidance: "Send recovery context after the recipient is healthy." }], { error: true, recipientTurnFailed: true, messageId: replyMessage.id, replyTo: questionId }),
               };
             }
             return {
@@ -2034,10 +2055,12 @@ Usage:
                 // The waiter is cleanup-only on this path. The real failure is the one from the outer catch.
               }
             }
+            const errorMessage = getErrorMessage(error);
+            const timedOut = errorMessage.startsWith("No reply from");
             return {
-              content: [{ type: "text", text: `Failed: ${getErrorMessage(error)}` }],
+              content: [{ type: "text", text: `Failed: ${errorMessage}` }],
               isError: true,
-              details: { error: true },
+              details: failureDetails(timedOut ? "reply_timeout" : errorMessage.startsWith("Target ") ? "ambiguous_target" : "ask_failed", [{ action: "status" }, { action: "list" }, { action: "send", guidance: "Check the recipient before retrying; the original ask may still be seen." }], { error: true, ...(questionId ? { messageId: questionId } : {}) }),
             };
           }
         }
@@ -2069,7 +2092,7 @@ Usage:
               return {
                 content: [{ type: "text", text: `Reply to "${target.from.name || target.from.id}" was not delivered: ${errorText}` }],
                 isError: true,
-                details: { messageId: result.id, accepted: result.accepted, delivered: false, queued: result.queued === true, reason: result.reason },
+                details: failureDetails("delivery_failed", [{ action: "pending" }, { action: "send", guidance: "Send a new message if the original sender is no longer available." }], { messageId: result.id, accepted: result.accepted, delivered: false, queued: result.queued === true, reason: result.reason, replyTo: target.message.id }),
               };
             }
             replyTracker.markReplied(target.message.id);
@@ -2084,13 +2107,17 @@ Usage:
             return {
               content: [{ type: "text", text: `Reply sent to ${target.from.name || target.from.id}` }],
               isError: false,
-              details: { messageId: result.id, delivered: true, replyTo: target.message.id },
+              details: { messageId: result.id, delivered: true, replyTo: target.message.id, reasonCode: "reply_sent" },
             };
           } catch (error) {
+            const errorMessage = getErrorMessage(error);
+            const reasonCode = replyFailureReason(errorMessage);
             return {
-              content: [{ type: "text", text: `Failed to reply: ${getErrorMessage(error)}` }],
+              content: [{ type: "text", text: `Failed to reply: ${errorMessage}` }],
               isError: true,
-              details: { error: true },
+              details: failureDetails(reasonCode, reasonCode === "no_pending_reply"
+                ? [{ action: "pending" }, { action: "send", guidance: "Use send with an explicit recipient when there is no inbound ask to reply to." }]
+                : [{ action: "pending" }, { action: "list" }], { error: true, ...(replyTo ? { replyTo } : {}) }),
             };
           }
         }

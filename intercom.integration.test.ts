@@ -1,6 +1,6 @@
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
@@ -897,7 +897,13 @@ test("intercom ask returns an error result for recipient turn failure replies", 
     const result = await resultPromise;
     assert.equal(result.isError, true);
     assert.match(result.content[0]?.text ?? "", /Recipient turn failed: No API key for provider: test/);
-    assert.deepEqual(result.details, { error: true, recipientTurnFailed: true });
+    assert.equal(result.details?.reasonCode, "recipient_turn_failed");
+    assert.equal(typeof result.details?.messageId, "string");
+    assert.equal(typeof result.details?.replyTo, "string");
+    assert.deepEqual(result.details?.nextActions, [
+      { action: "status" },
+      { action: "send", guidance: "Send recovery context after the recipient is healthy." },
+    ]);
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await worker.disconnect().catch(() => undefined);
@@ -1947,7 +1953,7 @@ test("stale queued subagent progress updates are dropped", { concurrency: false 
 test("intercom tool validates passive and replace delivery options", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { cleanup } = await setupClients();
-  const harness = createExtensionHarness("delivery-validation", { hasUI: true });
+  const harness = createExtensionHarness("planner", { hasUI: true });
 
   try {
     piIntercomExtension(harness.pi as never);
@@ -1972,6 +1978,8 @@ test("intercom tool validates passive and replace delivery options", { concurren
     }, new AbortController().signal, undefined, harness.ctx);
     assert.equal(replaceWithoutThread.isError, true);
     assert.match(replaceWithoutThread.content[0]?.text ?? "", /requires a non-empty threadId/);
+    assert.equal(replaceWithoutThread.details?.reasonCode, "invalid_queue_arguments");
+    assert.equal(replaceWithoutThread.details?.nextActions?.[0]?.action, "send");
 
     const queueModeWithoutQueue = await intercomTool.execute("queue-mode-without-delivery", {
       action: "send",
@@ -1981,6 +1989,7 @@ test("intercom tool validates passive and replace delivery options", { concurren
     }, new AbortController().signal, undefined, harness.ctx);
     assert.equal(queueModeWithoutQueue.isError, true);
     assert.match(queueModeWithoutQueue.content[0]?.text ?? "", /only valid with delivery='queue'/);
+    assert.equal(queueModeWithoutQueue.details?.reasonCode, "invalid_queue_arguments");
 
     const deliveryOnPending = await intercomTool.execute("delivery-on-pending", {
       action: "pending",
@@ -1988,9 +1997,74 @@ test("intercom tool validates passive and replace delivery options", { concurren
     }, new AbortController().signal, undefined, harness.ctx);
     assert.equal(deliveryOnPending.isError, true);
     assert.match(deliveryOnPending.content[0]?.text ?? "", /only valid for action='send' or action='ask'/);
+    assert.equal(deliveryOnPending.details?.reasonCode, "invalid_queue_arguments");
+
+    const deliveryFailure = await intercomTool.execute("delivery-failure", {
+      action: "send",
+      to: "missing-fit7-recipient",
+      message: "will fail",
+    }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(deliveryFailure.isError, true);
+    assert.equal(deliveryFailure.details?.reasonCode, "delivery_failed");
+    assert.equal(typeof deliveryFailure.details?.messageId, "string");
+    assert.deepEqual((deliveryFailure.details?.nextActions as Array<{ action: string }>).map((next) => next.action), ["list", "send"]);
+
+    const ambiguousTarget = await intercomTool.execute("ambiguous-target", {
+      action: "send",
+      to: "planner",
+      message: "target check",
+    }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(ambiguousTarget.isError, true);
+    assert.match(ambiguousTarget.content[0]?.text ?? "", /matches multiple sessions/);
+    assert.equal(ambiguousTarget.details?.reasonCode, "ambiguous_target");
+    assert.deepEqual((ambiguousTarget.details?.nextActions as Array<{ action: string }>).map((next) => next.action), ["list", "send"]);
+
+    const noPendingReply = await intercomTool.execute("reply-without-context", {
+      action: "reply",
+      message: "orphan reply",
+    }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(noPendingReply.isError, true);
+    assert.match(noPendingReply.content[0]?.text ?? "", /No active intercom context/);
+    assert.equal(noPendingReply.details?.reasonCode, "no_pending_reply");
+    assert.deepEqual((noPendingReply.details?.nextActions as Array<{ action: string }>).map((next) => next.action), ["pending", "send"]);
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await cleanup();
+  }
+});
+
+test("intercom ask timeout exposes the original message id and recovery actions", { concurrency: false }, async () => {
+  const configPath = path.join(sharedAgentDir, "intercom", "config.json");
+  const previousConfig = existsSync(configPath) ? readFileSync(configPath) : undefined;
+  let cleanup: (() => Promise<void>) | undefined;
+  let harness: ReturnType<typeof createExtensionHarness> | undefined;
+
+  try {
+    mkdirSync(path.dirname(configPath), { recursive: true });
+    writeFileSync(configPath, JSON.stringify({ askTimeoutMs: 1000 }));
+    const { default: piIntercomExtension } = await import("./index.ts");
+    const setup = await setupClients();
+    cleanup = setup.cleanup;
+    harness = createExtensionHarness("timeout-reasons", { hasUI: true });
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const result = await intercomTool.execute("timeout-ask", {
+      action: "ask",
+      to: setup.planner.sessionId!,
+      message: "Will time out",
+    }, new AbortController().signal, undefined, harness.ctx);
+
+    assert.equal(result.isError, true);
+    assert.match(result.content[0]?.text ?? "", /No reply .* within 1 minute/);
+    assert.equal(result.details?.reasonCode, "reply_timeout");
+    assert.equal(typeof result.details?.messageId, "string");
+    assert.deepEqual((result.details?.nextActions as Array<{ action: string }>).map((next) => next.action), ["status", "list", "send"]);
+  } finally {
+    if (harness) await harness.emitLifecycle("session_shutdown");
+    await cleanup?.();
+    if (previousConfig) writeFileSync(configPath, previousConfig);
+    else rmSync(configPath, { force: true });
   }
 });
 
@@ -2629,6 +2703,33 @@ test("pending output expands subagent supervisor asks", { concurrency: false }, 
     assert.match(text, /agent=worker/);
     assert.match(text, /target=subagent-worker-78f659a3-1/);
     assert.match(text, /question=Should I use the stable API or experimental API\?/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("subagent identity event exposes only the current connected broker session id", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  const harness = createExtensionHarness("planner", { hasUI: true });
+  const responses: Array<{ requestId?: string; sessionId?: string }> = [];
+  harness.pi.events.on("subagent:intercom-identity-response", (payload) => responses.push(payload as { requestId?: string; sessionId?: string }));
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    harness.pi.events.emit("subagent:intercom-identity-request", { requestId: "before-connect" });
+    assert.deepEqual(responses, []);
+
+    await harness.emitLifecycle("session_start");
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    await intercomTool.execute("connect", { action: "status" }, new AbortController().signal, undefined, harness.ctx);
+    harness.pi.events.emit("subagent:intercom-identity-request", { requestId: "connected" });
+
+    assert.equal(responses.length, 1);
+    assert.equal(responses[0]?.requestId, "connected");
+    assert.equal(typeof responses[0]?.sessionId, "string");
+    assert.notEqual(responses[0]?.sessionId, planner.sessionId, "duplicate visible names retain distinct exact identities");
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await cleanup();

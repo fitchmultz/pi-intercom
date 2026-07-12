@@ -66,11 +66,6 @@ function signalBroker(broker: BrokerProcess, signal: NodeJS.Signals): void {
   broker.kill(signal);
 }
 
-process.on("exit", () => {
-  for (const broker of activeBrokers) signalBroker(broker, "SIGKILL");
-  signalSharedBroker("SIGKILL");
-});
-
 after(async () => {
   await Promise.all([...activeBrokers].map(stopBroker));
   await stopSharedBroker();
@@ -359,6 +354,22 @@ async function stopBroker(broker: BrokerProcess): Promise<void> {
   ]);
 }
 
+async function connectClient(
+  client: InstanceType<typeof IntercomClient>,
+  name: string,
+  overrides: Partial<Omit<SessionInfo, "id" | "name">> = {},
+): Promise<void> {
+  await client.connect({
+    name,
+    cwd: repoDir,
+    model: "test-model",
+    pid: process.pid,
+    startedAt: Date.now(),
+    lastActivity: Date.now(),
+    ...overrides,
+  });
+}
+
 async function setupClients() {
   const broker = await setupBroker();
 
@@ -366,22 +377,8 @@ async function setupClients() {
     const planner = new IntercomClient();
     const orchestrator = new IntercomClient();
 
-    await planner.connect({
-      name: "planner",
-      cwd: repoDir,
-      model: "test-model",
-      pid: process.pid,
-      startedAt: Date.now(),
-      lastActivity: Date.now(),
-    });
-    await orchestrator.connect({
-      name: "orchestrator",
-      cwd: repoDir,
-      model: "test-model",
-      pid: process.pid,
-      startedAt: Date.now(),
-      lastActivity: Date.now(),
-    });
+    await connectClient(planner, "planner");
+    await connectClient(orchestrator, "orchestrator");
 
     return {
       planner,
@@ -425,43 +422,33 @@ function waitForReply(client: InstanceType<typeof IntercomClient>, replyTo: stri
   });
 }
 
-async function waitForSessionByName(client: InstanceType<typeof IntercomClient>, name: string): Promise<SessionInfo> {
+async function waitForSession(
+  client: InstanceType<typeof IntercomClient>,
+  matches: (session: SessionInfo) => boolean,
+  timeoutMessage: (sessions: SessionInfo[]) => string,
+): Promise<SessionInfo> {
   const deadline = Date.now() + 2000;
   while (Date.now() < deadline) {
-    const session = (await client.listSessions()).find((candidate) => candidate.name === name);
-    if (session) {
-      return session;
-    }
+    const session = (await client.listSessions()).find(matches);
+    if (session) return session;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  const sessions = await client.listSessions();
-  throw new Error(`Timed out waiting for ${name}; saw ${JSON.stringify(sessions.map((session) => session.name))}`);
+  throw new Error(timeoutMessage(await client.listSessions()));
 }
 
-async function waitForSessionStatus(client: InstanceType<typeof IntercomClient>, name: string, status: string): Promise<SessionInfo> {
-  const deadline = Date.now() + 2000;
-  while (Date.now() < deadline) {
-    const session = (await client.listSessions()).find((candidate) => candidate.name === name);
-    if (session?.status === status) {
-      return session;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  const sessions = await client.listSessions();
-  throw new Error(`Timed out waiting for ${name} status ${status}; saw ${JSON.stringify(sessions.map((session) => ({ name: session.name, status: session.status })))}`);
+function waitForSessionByName(client: InstanceType<typeof IntercomClient>, name: string): Promise<SessionInfo> {
+  return waitForSession(client, (session) => session.name === name,
+    (sessions) => `Timed out waiting for ${name}; saw ${JSON.stringify(sessions.map((session) => session.name))}`);
 }
 
-async function waitForSessionModel(client: InstanceType<typeof IntercomClient>, name: string, model: string): Promise<SessionInfo> {
-  const deadline = Date.now() + 2000;
-  while (Date.now() < deadline) {
-    const session = (await client.listSessions()).find((candidate) => candidate.name === name);
-    if (session?.model === model) {
-      return session;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  const sessions = await client.listSessions();
-  throw new Error(`Timed out waiting for ${name} model ${model}; saw ${JSON.stringify(sessions.map((session) => ({ name: session.name, model: session.model })))}`);
+function waitForSessionStatus(client: InstanceType<typeof IntercomClient>, name: string, status: string): Promise<SessionInfo> {
+  return waitForSession(client, (session) => session.name === name && session.status === status,
+    (sessions) => `Timed out waiting for ${name} status ${status}; saw ${JSON.stringify(sessions.map((session) => ({ name: session.name, status: session.status })))}`);
+}
+
+function waitForSessionModel(client: InstanceType<typeof IntercomClient>, name: string, model: string): Promise<SessionInfo> {
+  return waitForSession(client, (session) => session.name === name && session.model === model,
+    (sessions) => `Timed out waiting for ${name} model ${model}; saw ${JSON.stringify(sessions.map((session) => ({ name: session.name, model: session.model })))}`);
 }
 
 test("intercom tool renders compact call and result rows", async () => {
@@ -562,13 +549,7 @@ test("intercom list and status show recipient capability and delivery guidance",
   const busyPeer = new IntercomClient();
 
   try {
-    await busyPeer.connect({
-      name: "busy-peer",
-      cwd: repoDir,
-      model: "test-model",
-      pid: process.pid,
-      startedAt: Date.now(),
-      lastActivity: Date.now(),
+    await connectClient(busyPeer, "busy-peer", {
       status: "thinking",
       acceptsAsks: false,
       pendingAsks: 2,
@@ -658,14 +639,7 @@ test("broker returns a clean delivery failure when forwarding would exceed the f
       startedAt: Date.now(),
       lastActivity: Date.now(),
     });
-    await receiver.connect({
-      name: "large-receiver",
-      cwd: repoDir,
-      model: "test-model",
-      pid: process.pid,
-      startedAt: Date.now(),
-      lastActivity: Date.now(),
-    });
+    await connectClient(receiver, "large-receiver");
 
     const result = await sender.send(receiver.sessionId!, {
       messageId: "too-large-forward",
@@ -905,14 +879,7 @@ test("intercom ask returns an error result for recipient turn failure replies", 
   try {
     piIntercomExtension(harness.pi as never);
     await harness.emitLifecycle("session_start");
-    await worker.connect({
-      name: "failing-peer",
-      cwd: repoDir,
-      model: "test-model",
-      pid: process.pid,
-      startedAt: Date.now(),
-      lastActivity: Date.now(),
-    });
+    await connectClient(worker, "failing-peer");
     const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
     const askReceived = once(worker, "message") as Promise<[SessionInfo, Message]>;
     const resultPromise = intercomTool.execute("ask-failure", {
@@ -947,14 +914,7 @@ test("intercom ask treats failure-like normal reply text as a successful reply",
   try {
     piIntercomExtension(harness.pi as never);
     await harness.emitLifecycle("session_start");
-    await worker.connect({
-      name: "prefix-reply-peer",
-      cwd: repoDir,
-      model: "test-model",
-      pid: process.pid,
-      startedAt: Date.now(),
-      lastActivity: Date.now(),
-    });
+    await connectClient(worker, "prefix-reply-peer");
     const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
     const askReceived = once(worker, "message") as Promise<[SessionInfo, Message]>;
     const resultPromise = intercomTool.execute("ask-normal-prefix", {
@@ -984,14 +944,7 @@ test("intercom ask rejects promptly when the reply peer disconnects", { concurre
   try {
     piIntercomExtension(harness.pi as never);
     await harness.emitLifecycle("session_start");
-    await worker.connect({
-      name: "disconnecting-peer",
-      cwd: repoDir,
-      model: "test-model",
-      pid: process.pid,
-      startedAt: Date.now(),
-      lastActivity: Date.now(),
-    });
+    await connectClient(worker, "disconnecting-peer");
     const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
     const askReceived = once(worker, "message") as Promise<[SessionInfo, Message]>;
     const resultPromise = intercomTool.execute("ask-peer-disconnect", {
@@ -1057,22 +1010,8 @@ test("intercom tool accepts displayed short IDs when session names are duplicate
     piIntercomExtension(harness.pi as never);
     await harness.emitLifecycle("session_start");
 
-    await duplicateA.connect({
-      name: "duplicate-worker",
-      cwd: repoDir,
-      model: "test-model",
-      pid: process.pid,
-      startedAt: Date.now(),
-      lastActivity: Date.now(),
-    });
-    await duplicateB.connect({
-      name: "duplicate-worker",
-      cwd: repoDir,
-      model: "test-model",
-      pid: process.pid,
-      startedAt: Date.now(),
-      lastActivity: Date.now(),
-    });
+    await connectClient(duplicateA, "duplicate-worker");
+    await connectClient(duplicateB, "duplicate-worker");
 
     const duplicateSessions = (await planner.listSessions()).filter((session) => session.name === "duplicate-worker");
     assert.equal(duplicateSessions.length, 2);
@@ -1130,14 +1069,7 @@ test("intercom tool accepts displayed short IDs when session names are duplicate
     assert.match(duplicateNameResult.content[0]?.text ?? "", /Use one of these targets/);
     assert.match(duplicateNameResult.content[0]?.text ?? "", new RegExp(shortTarget));
 
-    await nameCollision.connect({
-      name: shortTarget,
-      cwd: repoDir,
-      model: "test-model",
-      pid: process.pid,
-      startedAt: Date.now(),
-      lastActivity: Date.now(),
-    });
+    await connectClient(nameCollision, shortTarget);
     const collisionResult = await intercomTool.execute("tool-collision", {
       action: "send",
       to: shortTarget,
@@ -1366,13 +1298,7 @@ test("intercom ask returns delivered peer_idle when target publishes acceptsAsks
   const harness = createExtensionHarness("ask-controller", { hasUI: true });
 
   try {
-    await peer.connect({
-      name: "busy-peer-health",
-      cwd: repoDir,
-      model: "test-model",
-      pid: process.pid,
-      startedAt: Date.now(),
-      lastActivity: Date.now(),
+    await connectClient(peer, "busy-peer-health", {
       acceptsAsks: false,
       pendingAsks: 1,
       lastIntercomActivity: 0,
@@ -1413,13 +1339,7 @@ test("explicit steer asks wait for replies even when peer health says idle", { c
   const harness = createExtensionHarness("ask-steer-controller", { hasUI: true });
 
   try {
-    await peer.connect({
-      name: "busy-peer-steer",
-      cwd: repoDir,
-      model: "test-model",
-      pid: process.pid,
-      startedAt: Date.now(),
-      lastActivity: Date.now(),
+    await connectClient(peer, "busy-peer-steer", {
       acceptsAsks: false,
       pendingAsks: 1,
       lastIntercomActivity: 0,
@@ -1464,13 +1384,7 @@ test("explicit queue asks wait for replies even when peer health says idle", { c
   const harness = createExtensionHarness("ask-queue-controller", { hasUI: true });
 
   try {
-    await peer.connect({
-      name: "busy-peer-queue",
-      cwd: repoDir,
-      model: "test-model",
-      pid: process.pid,
-      startedAt: Date.now(),
-      lastActivity: Date.now(),
+    await connectClient(peer, "busy-peer-queue", {
       acceptsAsks: false,
       pendingAsks: 1,
       lastIntercomActivity: 0,
@@ -2723,30 +2637,11 @@ test("pending output expands subagent supervisor asks", { concurrency: false }, 
 
 test("subagent control intercom events wake the current orchestrator session", async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
-  const events = new EventEmitter();
-  const sentMessages: Array<{ message: { customType?: string; content?: string; display?: boolean }; options?: { triggerTurn?: boolean } }> = [];
-  const pi = {
-    getSessionName: () => "orchestrator",
-    events: {
-      on: (channel: string, handler: (payload: unknown) => void) => {
-        events.on(channel, handler);
-        return () => events.off(channel, handler);
-      },
-      emit: (channel: string, payload: unknown) => events.emit(channel, payload),
-    },
-    on: () => undefined,
-    registerMessageRenderer: () => undefined,
-    registerTool: () => undefined,
-    registerCommand: () => undefined,
-    registerShortcut: () => undefined,
-    sendMessage: (message: { customType?: string; content?: string; display?: boolean }, options?: { triggerTurn?: boolean }) => {
-      sentMessages.push({ message, options });
-    },
-    appendEntry: () => undefined,
-  };
+  const harness = createExtensionHarness("orchestrator");
+  const { sentMessages } = harness;
 
-  piIntercomExtension(pi as never);
-  pi.events.emit("subagent:control-intercom", {
+  piIntercomExtension(harness.pi as never);
+  harness.pi.events.emit("subagent:control-intercom", {
     to: "orchestrator",
     message: "subagent needs attention\n\nworker needs attention in run 78f659a3.",
   });
@@ -2759,7 +2654,7 @@ test("subagent control intercom events wake the current orchestrator session", a
   assert.equal(sentMessages[0]?.options?.triggerTurn, true);
 
   sentMessages.length = 0;
-  pi.events.emit("subagent:control-intercom", {
+  harness.pi.events.emit("subagent:control-intercom", {
     to: "orchestrator",
     source: "foreground",
     message: "subagent needs attention\n\nworker needs attention in run 78f659a3.",
@@ -2768,7 +2663,7 @@ test("subagent control intercom events wake the current orchestrator session", a
 
   assert.deepEqual(sentMessages, []);
 
-  pi.events.emit("subagent:control-intercom", {
+  harness.pi.events.emit("subagent:control-intercom", {
     to: "orchestrator",
     source: "async",
     message: "subagent needs attention\n\nworker needs attention in run async-1.",
@@ -2780,32 +2675,13 @@ test("subagent control intercom events wake the current orchestrator session", a
 
 test("async subagent result intercom events wake the current orchestrator session", async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
-  const events = new EventEmitter();
-  const sentMessages: Array<{ message: { customType?: string; content?: string }; options?: { triggerTurn?: boolean; deliverAs?: string } }> = [];
+  const harness = createExtensionHarness("orchestrator");
+  const { sentMessages } = harness;
   const deliveryAcks: unknown[] = [];
-  events.on("subagent:result-intercom-delivery", (payload) => deliveryAcks.push(payload));
-  const pi = {
-    getSessionName: () => "orchestrator",
-    events: {
-      on: (channel: string, handler: (payload: unknown) => void) => {
-        events.on(channel, handler);
-        return () => events.off(channel, handler);
-      },
-      emit: (channel: string, payload: unknown) => events.emit(channel, payload),
-    },
-    on: () => undefined,
-    registerMessageRenderer: () => undefined,
-    registerTool: () => undefined,
-    registerCommand: () => undefined,
-    registerShortcut: () => undefined,
-    sendMessage: (message: { customType?: string; content?: string }, options?: { triggerTurn?: boolean; deliverAs?: string }) => {
-      sentMessages.push({ message, options });
-    },
-    appendEntry: () => undefined,
-  };
+  harness.pi.events.on("subagent:result-intercom-delivery", (payload) => deliveryAcks.push(payload));
 
-  piIntercomExtension(pi as never);
-  pi.events.emit("subagent:result-intercom", {
+  piIntercomExtension(harness.pi as never);
+  harness.pi.events.emit("subagent:result-intercom", {
     to: "orchestrator",
     requestId: "result-1",
     source: "async",
@@ -2823,32 +2699,13 @@ test("async subagent result intercom events wake the current orchestrator sessio
 
 test("foreground subagent result intercom events are acknowledged without messaging the current orchestrator session", async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
-  const events = new EventEmitter();
-  const sentMessages: Array<{ message: { customType?: string; content?: string }; options?: { triggerTurn?: boolean; deliverAs?: string } }> = [];
+  const harness = createExtensionHarness("orchestrator");
+  const { sentMessages } = harness;
   const deliveryAcks: unknown[] = [];
-  events.on("subagent:result-intercom-delivery", (payload) => deliveryAcks.push(payload));
-  const pi = {
-    getSessionName: () => "orchestrator",
-    events: {
-      on: (channel: string, handler: (payload: unknown) => void) => {
-        events.on(channel, handler);
-        return () => events.off(channel, handler);
-      },
-      emit: (channel: string, payload: unknown) => events.emit(channel, payload),
-    },
-    on: () => undefined,
-    registerMessageRenderer: () => undefined,
-    registerTool: () => undefined,
-    registerCommand: () => undefined,
-    registerShortcut: () => undefined,
-    sendMessage: (message: { customType?: string; content?: string }, options?: { triggerTurn?: boolean; deliverAs?: string }) => {
-      sentMessages.push({ message, options });
-    },
-    appendEntry: () => undefined,
-  };
+  harness.pi.events.on("subagent:result-intercom-delivery", (payload) => deliveryAcks.push(payload));
 
-  piIntercomExtension(pi as never);
-  pi.events.emit("subagent:result-intercom", {
+  piIntercomExtension(harness.pi as never);
+  harness.pi.events.emit("subagent:result-intercom", {
     to: "orchestrator",
     requestId: "result-foreground",
     source: "foreground",
@@ -2868,14 +2725,7 @@ test("subagent live intercom events steer a registered child", { concurrency: fa
   const deliveryAcks: unknown[] = [];
   harness.pi.events.on("subagent:live-intercom-delivery", (payload) => deliveryAcks.push(payload));
   try {
-    await child.connect({
-      name: "subagent-worker-run-live-1",
-      cwd: repoDir,
-      model: "test-model",
-      pid: process.pid,
-      startedAt: Date.now(),
-      lastActivity: Date.now(),
-    });
+    await connectClient(child, "subagent-worker-run-live-1");
     piIntercomExtension(harness.pi as never);
     await harness.emitLifecycle("session_start");
     await waitForSessionByName(child, "supervisor");
@@ -2908,14 +2758,7 @@ test("subagent intercom health queries report registered and missing targets", {
   const responses: unknown[] = [];
   harness.pi.events.on("subagent:intercom-health-response", (payload) => responses.push(payload));
   try {
-    await child.connect({
-      name: "subagent-worker-health-1",
-      cwd: repoDir,
-      model: "test-model",
-      pid: process.pid,
-      startedAt: Date.now(),
-      lastActivity: Date.now(),
-    });
+    await connectClient(child, "subagent-worker-health-1");
     piIntercomExtension(harness.pi as never);
     await harness.emitLifecycle("session_start");
     await waitForSessionByName(child, "supervisor-health");

@@ -543,7 +543,6 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   let reconnectPromiseGeneration: number | null = null;
   let startupConnectTimer: NodeJS.Timeout | null = null;
   let reconnectAttempt = 0;
-  let shuttingDown = false;
   let disposed = true;
   let runtimeStarted = false;
   let runtimeGeneration = 0;
@@ -626,7 +625,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     inboundFlushTimer = null;
   }
   function getLiveContext(ctx: ExtensionContext | null = runtimeContext, generation = runtimeGeneration): ExtensionContext | null {
-    if (disposed || shuttingDown || generation !== runtimeGeneration || !ctx) {
+    if (disposed || generation !== runtimeGeneration || !ctx) {
       return null;
     }
     try {
@@ -1001,7 +1000,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       }
       rejectReplyWaiter(new Error(`Disconnected while waiting for reply: ${error.message}`, { cause: error }));
       client = null;
-      if (!shuttingDown && !disposed) {
+      if (!disposed) {
         clearReconnectTimer();
         scheduleReconnect();
       }
@@ -1011,7 +1010,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     });
   }
   function scheduleReconnect(): void {
-    if (disposed || shuttingDown || reconnectTimer || reconnectPromise || !getLiveContext()) {
+    if (disposed || reconnectTimer || reconnectPromise || !getLiveContext()) {
       return;
     }
     const scheduledGeneration = runtimeGeneration;
@@ -1030,7 +1029,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     if (!config.enabled) {
       throw new Error("Intercom disabled");
     }
-    if (disposed || shuttingDown) {
+    if (disposed) {
       throw new Error("Intercom shutting down");
     }
     if (client && client.isConnected()) {
@@ -1255,7 +1254,6 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     if (!config.enabled) {
       return;
     }
-    shuttingDown = false;
     disposed = false;
     runtimeStarted = true;
     runtimeGeneration += 1;
@@ -1295,7 +1293,6 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     eventUnsubscribes = [];
     eventBridgesActive = false;
-    shuttingDown = true;
     disposed = true;
     runtimeGeneration += 1;
     clearStartupConnectTimer();

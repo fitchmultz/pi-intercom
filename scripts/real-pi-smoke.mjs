@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import process from "node:process";
+import { parseArgs as parseNodeArgs } from "node:util";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const authAgentDir = process.env.PI_REAL_SMOKE_AUTH_AGENT_DIR
@@ -20,36 +21,51 @@ function parsePositiveInteger(value, source) {
   return parsed;
 }
 
+const CLI_OPTIONS = {
+  llm: { type: "boolean" },
+  "keep-temp": { type: "boolean" },
+  "timeout-ms": { type: "string" },
+  help: { type: "boolean", short: "h" },
+};
+
+function parseNodeValues(args) {
+  return parseNodeArgs({ args, options: CLI_OPTIONS, strict: true }).values;
+}
+
 function parseArgs(argv) {
-  const options = { llm: false, keepTemp: false, timeoutMs: DEFAULT_TIMEOUT_MS };
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg === "--help" || arg === "-h") {
-      usage();
-      process.exit(0);
-    }
-    if (arg === "--llm") {
-      options.llm = true;
-      continue;
-    }
-    if (arg === "--keep-temp") {
-      options.keepTemp = true;
-      continue;
-    }
+  const helpIndex = argv.findIndex((arg) => arg === "--help" || arg === "-h");
+  const args = helpIndex === -1 ? argv : argv.slice(0, helpIndex + 1);
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
     if (arg === "--timeout-ms") {
-      const value = argv[index + 1];
-      if (!value) throw new Error("--timeout-ms requires a value");
-      options.timeoutMs = parsePositiveInteger(value, "--timeout-ms");
+      const values = parseNodeValues(args.slice(0, index + 2));
+      parsePositiveInteger(values["timeout-ms"], "--timeout-ms");
       index += 1;
       continue;
     }
     if (arg.startsWith("--timeout-ms=")) {
-      options.timeoutMs = parsePositiveInteger(arg.slice("--timeout-ms=".length), "--timeout-ms");
+      const values = parseNodeValues(args.slice(0, index + 1));
+      parsePositiveInteger(values["timeout-ms"], "--timeout-ms");
       continue;
     }
-    throw new Error(`Unknown option: ${arg}`);
+    if (arg === "--" || /^-[^-].{1,}$/.test(arg)) {
+      parseNodeValues(args.slice(0, index));
+      throw new Error(`Unknown option: ${arg}`);
+    }
   }
-  return options;
+
+  const values = parseNodeValues(args);
+  if (values.help) {
+    usage();
+    process.exit(0);
+  }
+  return {
+    llm: values.llm ?? false,
+    keepTemp: values["keep-temp"] ?? false,
+    timeoutMs: values["timeout-ms"] === undefined
+      ? DEFAULT_TIMEOUT_MS
+      : parsePositiveInteger(values["timeout-ms"], "--timeout-ms"),
+  };
 }
 
 function commandName(base) {

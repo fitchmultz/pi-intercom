@@ -13,7 +13,7 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ### Changed
 - Updated the local Pi development baseline and compatibility imports for Pi 0.80.6.
-- `send` now wakes idle recipient agents by default and surfaces clearer guidance for active-recipient delivery; passive delivery is explicit via `delivery:"passive"` or legacy `passive:true` and discouraged for agent-to-agent coordination.
+- `send` now wakes idle recipient agents by default and surfaces clearer guidance for active-recipient delivery; passive delivery is explicit via `delivery:"passive"` and discouraged for agent-to-agent coordination.
 
 ### Fixed
 - Busy non-interactive recipients now receive default non-reply sends after the current tool call, and queued replace-mode sends coalesce to the latest visible message instead of being dropped or delivered too late.

@@ -5,7 +5,7 @@ import { randomUUID } from "crypto";
 import { getPiAgentDir } from "../agent-dir.js";
 import { writeMessage, createMessageReader, validateIntercomMessageSize } from "./framing.js";
 import { getBrokerSocketPath } from "./paths.js";
-import { isMessage } from "../types.js";
+import { isMessage, isSessionInfo } from "../types.js";
 import type { SessionInfo, Message, BrokerMessage } from "../types.js";
 
 const INTERCOM_DIR = join(getPiAgentDir(), "intercom");
@@ -25,46 +25,6 @@ interface PendingReplaceDelivery {
   toId: string;
   message: Message;
   timer: NodeJS.Timeout;
-}
-
-function isSessionRegistration(value: unknown): value is Omit<SessionInfo, "id"> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return false;
-  }
-
-  const session = value as Record<string, unknown>;
-
-  if (
-    typeof session.cwd !== "string"
-    || typeof session.model !== "string"
-    || typeof session.pid !== "number"
-    || typeof session.startedAt !== "number"
-    || typeof session.lastActivity !== "number"
-  ) {
-    return false;
-  }
-
-  if (session.name !== undefined && typeof session.name !== "string") {
-    return false;
-  }
-
-  if (session.status !== undefined && typeof session.status !== "string") {
-    return false;
-  }
-
-  if (session.lastSeen !== undefined && typeof session.lastSeen !== "number") {
-    return false;
-  }
-
-  if (session.lastIntercomActivity !== undefined && typeof session.lastIntercomActivity !== "number") {
-    return false;
-  }
-
-  if (session.pendingAsks !== undefined && typeof session.pendingAsks !== "number") {
-    return false;
-  }
-
-  return session.acceptsAsks === undefined || typeof session.acceptsAsks === "boolean";
 }
 
 class IntercomBroker {
@@ -156,7 +116,7 @@ class IntercomBroker {
 
     switch (clientMessage.type) {
       case "register": {
-        if (!isSessionRegistration(clientMessage.session)) {
+        if (!isSessionInfo(clientMessage.session, false)) {
           throw new Error("Invalid register message");
         }
 
@@ -209,7 +169,9 @@ class IntercomBroker {
 
       case "send": {
         const message = clientMessage.message;
-        const messageId = isMessage(message) ? message.id : "unknown";
+        const messageId = typeof message === "object" && message !== null && "id" in message && typeof message.id === "string"
+          ? message.id
+          : "unknown";
 
         if (typeof clientMessage.to !== "string" || !isMessage(message)) {
           writeMessage(socket, {

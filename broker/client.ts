@@ -3,7 +3,7 @@ import net from "net";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.js";
 import { getBrokerSocketPath } from "./paths.js";
-import { isMessage } from "../types.js";
+import { isMessage, isSessionInfo } from "../types.js";
 import type { SessionInfo, Message, Attachment, MessageDelivery, QueueMode } from "../types.js";
 
 const BROKER_SOCKET = getBrokerSocketPath();
@@ -28,7 +28,6 @@ interface SendOptions {
   delivery?: MessageDelivery;
   queueMode?: QueueMode;
   threadId?: string;
-  passive?: boolean;
   messageId?: string;
 }
 
@@ -42,47 +41,6 @@ export interface SendResult {
 
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
-}
-
-function isSessionInfo(value: unknown): value is SessionInfo {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-
-  const session = value as Record<string, unknown>;
-
-  if (
-    typeof session.id !== "string"
-    || typeof session.cwd !== "string"
-    || typeof session.model !== "string"
-    || typeof session.pid !== "number"
-    || typeof session.startedAt !== "number"
-    || typeof session.lastActivity !== "number"
-  ) {
-    return false;
-  }
-
-  if (session.name !== undefined && typeof session.name !== "string") {
-    return false;
-  }
-
-  if (session.status !== undefined && typeof session.status !== "string") {
-    return false;
-  }
-
-  if (session.lastSeen !== undefined && typeof session.lastSeen !== "number") {
-    return false;
-  }
-
-  if (session.lastIntercomActivity !== undefined && typeof session.lastIntercomActivity !== "number") {
-    return false;
-  }
-
-  if (session.pendingAsks !== undefined && typeof session.pendingAsks !== "number") {
-    return false;
-  }
-
-  return session.acceptsAsks === undefined || typeof session.acceptsAsks === "boolean";
 }
 
 export class IntercomClient extends EventEmitter {
@@ -284,7 +242,7 @@ export class IntercomClient extends EventEmitter {
 
       case "sessions": {
         const { requestId, sessions } = brokerMessage;
-        if (typeof requestId !== "string" || !Array.isArray(sessions) || !sessions.every(isSessionInfo)) {
+        if (typeof requestId !== "string" || !Array.isArray(sessions) || !sessions.every((session) => isSessionInfo(session))) {
           throw new Error("Invalid sessions message");
         }
 
@@ -496,7 +454,6 @@ export class IntercomClient extends EventEmitter {
       delivery: options.delivery,
       queueMode: options.queueMode,
       threadId: options.threadId,
-      passive: options.passive,
       content: {
         text: options.text,
         attachments: options.attachments,

@@ -16,6 +16,11 @@
       "expected_output": "Uses contact_supervisor with reason need_decision instead of raw intercom, includes the blocking API choice, waits for the reply, and does not use contact_supervisor for routine completion."
     },
     {
+      "id": "success-passive-breadcrumb",
+      "prompt": "Leave a human-visible transcript breadcrumb for the connected planner without waking its model.",
+      "expected_output": "Uses intercom send with `delivery:\"passive\"`, not a boolean alias, and handles the delivery result without expecting a reply."
+    },
+    {
       "id": "edge-no-peer-connected",
       "prompt": "Send findings to worker, but intercom list shows no other sessions connected.",
       "expected_output": "Does not invent a target or claim delivery. Reports that no intercom-connected peer is available, optionally follows the visible-peer reference only if a long-lived visible session is justified, and otherwise continues local safe work."

@@ -729,7 +729,6 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     client.updatePresence({ status: currentStatus(), ...buildPresenceHealth() });
   }
   function requestedDelivery(message: Message): RequestedDelivery {
-    if (message.passive === true || message.delivery === "passive") return "passive";
     return message.delivery ?? "auto";
   }
   function shouldTriggerTurn(message: Message): boolean {
@@ -1751,10 +1750,7 @@ Usage:
       threadId: Type.Optional(Type.String({
         description: "Stable topic key for queueMode='replace'.",
       })),
-      passive: Type.Optional(Type.Boolean({
-        description: "For action='send' only: legacy alias for delivery='passive'. Discouraged for agent-to-agent messages.",
-      })),
-    }),
+    }, { additionalProperties: false }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       return throwIfToolError(await (async () => {
@@ -1771,14 +1767,7 @@ Usage:
 
       syncPresenceIdentity(ctx.sessionManager.getSessionId());
 
-      const { action, to, message, attachments, replyTo, delivery, queueMode, threadId, passive } = params;
-      if (passive !== undefined && action !== "send") {
-        return {
-          content: [{ type: "text", text: "'passive' is only valid for action='send'" }],
-          isError: true,
-          details: { error: true },
-        };
-      }
+      const { action, to, message, attachments, replyTo, delivery, queueMode, threadId } = params;
       if (delivery === "passive" && action !== "send") {
         return {
           content: [{ type: "text", text: "delivery='passive' is only valid for action='send'. Passive delivery is for human-visible breadcrumbs and is discouraged for agent-to-agent coordination; use ask without passive when you need a reply." }],
@@ -1791,13 +1780,6 @@ Usage:
           content: [{ type: "text", text: "'delivery', 'queueMode', and 'threadId' are only valid for action='send' or action='ask'" }],
           isError: true,
           details: failureDetails(queueMode !== undefined || delivery === "queue" || threadId !== undefined ? "invalid_queue_arguments" : "invalid_delivery_arguments", [{ action: "send", guidance: "Use delivery options only with send or ask." }], { error: true }),
-        };
-      }
-      if (passive === true && delivery !== undefined && delivery !== "passive") {
-        return {
-          content: [{ type: "text", text: "'passive' cannot be combined with a non-passive delivery mode" }],
-          isError: true,
-          details: { error: true },
         };
       }
       if (threadId !== undefined && queueMode !== "replace") {
@@ -1814,7 +1796,7 @@ Usage:
           details: failureDetails("invalid_queue_arguments", [{ action: "send", guidance: "Provide a non-empty threadId with delivery='queue' and queueMode='replace'." }], { error: true }),
         };
       }
-      const deliveryMode = (passive === true ? "passive" : delivery) as MessageDelivery | undefined;
+      const deliveryMode = delivery as MessageDelivery | undefined;
       const cleanedThreadId = typeof threadId === "string" ? threadId.trim() : undefined;
       if (queueMode !== undefined && deliveryMode !== "queue") {
         return {
@@ -1879,7 +1861,6 @@ Usage:
               delivery: deliveryMode,
               queueMode: queueMode as QueueMode | undefined,
               threadId: cleanedThreadId,
-              passive: passive === true,
             });
             if (!result.accepted) {
               const errorText = result.reason ?? "Session may not exist or has disconnected.";
@@ -1892,7 +1873,7 @@ Usage:
             markIntercomActivity();
             pi.appendEntry("intercom_sent", {
               to,
-              message: { text: message, attachments, replyTo, delivery: deliveryMode, queueMode, threadId: cleanedThreadId, passive: passive === true },
+              message: { text: message, attachments, replyTo, delivery: deliveryMode, queueMode, threadId: cleanedThreadId },
               messageId: result.id,
               timestamp: Date.now(),
             });

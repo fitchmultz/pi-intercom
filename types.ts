@@ -17,6 +17,25 @@ export interface SessionInfo {
   acceptsAsks?: boolean;
 }
 
+export function isSessionInfo(value: unknown): value is SessionInfo;
+export function isSessionInfo(value: unknown, requireId: false): value is Omit<SessionInfo, "id">;
+export function isSessionInfo(value: unknown, requireId = true): value is SessionInfo | Omit<SessionInfo, "id"> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const session = value as Record<string, unknown>;
+  return (!requireId || typeof session.id === "string")
+    && typeof session.cwd === "string"
+    && typeof session.model === "string"
+    && typeof session.pid === "number"
+    && typeof session.startedAt === "number"
+    && typeof session.lastActivity === "number"
+    && (session.name === undefined || typeof session.name === "string")
+    && (session.status === undefined || typeof session.status === "string")
+    && (session.lastSeen === undefined || typeof session.lastSeen === "number")
+    && (session.lastIntercomActivity === undefined || typeof session.lastIntercomActivity === "number")
+    && (session.pendingAsks === undefined || typeof session.pendingAsks === "number")
+    && (session.acceptsAsks === undefined || typeof session.acceptsAsks === "boolean");
+}
+
 export type MessageDelivery = "queue" | "steer" | "passive";
 export type QueueMode = "stack" | "replace";
 
@@ -31,8 +50,6 @@ export interface Message {
   queueMode?: QueueMode;
   /** Stable topic key for queueMode="replace". */
   threadId?: string;
-  /** If true, render without waking the recipient model. Discouraged for agent-to-agent messages. */
-  passive?: boolean;
   content: {
     text: string;
     attachments?: Attachment[];
@@ -75,6 +92,10 @@ export function isMessage(value: unknown): value is Message {
 
   const message = value as Record<string, unknown>;
 
+  if (Object.hasOwn(message, "passive")) {
+    return false;
+  }
+
   if (typeof message.id !== "string" || typeof message.timestamp !== "number") {
     return false;
   }
@@ -84,10 +105,6 @@ export function isMessage(value: unknown): value is Message {
   }
 
   if (message.expectsReply !== undefined && typeof message.expectsReply !== "boolean") {
-    return false;
-  }
-
-  if (message.passive !== undefined && typeof message.passive !== "boolean") {
     return false;
   }
 
@@ -112,11 +129,7 @@ export function isMessage(value: unknown): value is Message {
     return false;
   }
 
-  if (message.passive === true && message.delivery !== undefined && message.delivery !== "passive") {
-    return false;
-  }
-
-  if ((message.passive === true || message.delivery === "passive") && message.expectsReply === true) {
+  if (message.delivery === "passive" && message.expectsReply === true) {
     return false;
   }
 

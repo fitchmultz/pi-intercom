@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
-import { EventEmitter, once } from "node:events";
+import { EventEmitter, on as eventIterator, once } from "node:events";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import net from "node:net";
 import type { Readable } from "node:stream";
@@ -34,7 +34,8 @@ process.env.HOME = sharedHomeDir;
 process.env.USERPROFILE = sharedHomeDir;
 process.env.PI_CODING_AGENT_DIR = sharedAgentDir;
 const { IntercomClient } = await import("./broker/client.ts");
-const { MAX_FRAME_SIZE_BYTES } = await import("./broker/framing.ts");
+const { loadConfig } = await import("./config.ts");
+const { MAX_FRAME_SIZE_BYTES, createMessageReader, writeMessage } = await import("./broker/framing.ts");
 const { getBrokerSocketPath } = await import("./broker/paths.ts");
 process.on("exit", () => {
   for (const broker of activeBrokers) signalBroker(broker, "SIGKILL");
@@ -608,7 +609,7 @@ test("plain sends wake by default, passive sends do not, and only asks show repl
     assert.doesNotMatch(harness.sentMessages[0]?.message.content ?? "", /To reply/);
     assert.deepEqual(harness.sentMessages[0]?.options, { triggerTurn: true });
 
-    await planner.send(target.id, { messageId: "passive-send", text: "FYI later", passive: true });
+    await planner.send(target.id, { messageId: "passive-send", text: "FYI later", delivery: "passive" });
     await new Promise((resolve) => setImmediate(resolve));
     assert.match(harness.sentMessages[1]?.message.content ?? "", /FYI later/);
     assert.doesNotMatch(harness.sentMessages[1]?.message.content ?? "", /To reply/);
@@ -622,6 +623,92 @@ test("plain sends wake by default, passive sends do not, and only asks show repl
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await cleanup();
+  }
+});
+
+test("legacy passive wire messages fail with their ID and cannot wake recipients", { concurrency: false }, async () => {
+  const broker = await setupBroker();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const receiver = createExtensionHarness("legacy-wire-receiver", { hasUI: true });
+  const rawSender = net.connect(getBrokerSocketPath());
+  const rawEvents = new EventEmitter();
+  const rawMessages = eventIterator(rawEvents, "message");
+  const nextRawMessage = async (type: string, messageId?: string): Promise<unknown> => {
+    while (true) {
+      const next = await rawMessages.next();
+      assert.equal(next.done, false);
+      const message = next.value[0] as { type?: unknown; messageId?: unknown };
+      if (message.type === type && (messageId === undefined || message.messageId === messageId)) return message;
+    }
+  };
+
+  rawSender.on("data", createMessageReader(
+    (message) => rawEvents.emit("message", message),
+    (error) => rawEvents.emit("error", error),
+  ));
+
+  try {
+    piIntercomExtension(receiver.pi as never);
+    await once(rawSender, "connect");
+    await receiver.emitLifecycle("session_start");
+
+    const registered = nextRawMessage("registered");
+    writeMessage(rawSender, {
+      type: "register",
+      session: {
+        name: "legacy-wire-sender",
+        cwd: repoDir,
+        model: "test-model",
+        pid: process.pid,
+        startedAt: Date.now(),
+        lastActivity: Date.now(),
+      },
+    });
+    assert.equal((await registered as { type?: string }).type, "registered");
+
+    const legacyFailure = nextRawMessage("delivery_failed", "legacy-passive-wire");
+    writeMessage(rawSender, {
+      type: "send",
+      to: "legacy-wire-receiver",
+      message: {
+        id: "legacy-passive-wire",
+        timestamp: Date.now(),
+        passive: true,
+        content: { text: "must not arrive" },
+      },
+    });
+    assert.deepEqual(await legacyFailure, {
+      type: "delivery_failed",
+      messageId: "legacy-passive-wire",
+      reason: "Invalid message format",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(receiver.sentMessages.length, 0);
+
+    const passiveDelivery = nextRawMessage("delivered", "explicit-passive-wire");
+    writeMessage(rawSender, {
+      type: "send",
+      to: "legacy-wire-receiver",
+      message: {
+        id: "explicit-passive-wire",
+        timestamp: Date.now(),
+        delivery: "passive",
+        futureField: true,
+        content: { text: "transcript only" },
+      },
+    });
+    assert.deepEqual(await passiveDelivery, {
+      type: "delivered",
+      messageId: "explicit-passive-wire",
+    });
+    await waitForSentMessages(receiver, 1);
+    assert.match(receiver.sentMessages[0]?.message.content ?? "", /transcript only/);
+    assert.equal(receiver.sentMessages[0]?.options, undefined);
+  } finally {
+    await rawMessages.return?.();
+    rawSender.destroy();
+    await receiver.emitLifecycle("session_shutdown");
+    await stopBroker(broker);
   }
 });
 
@@ -668,7 +755,7 @@ test("broker returns a clean delivery failure when forwarding would exceed the f
   }
 });
 
-test("intercom send passive opt-in is exposed through the public tool", { concurrency: false }, async () => {
+test("intercom send passive delivery is exposed through the public tool without the removed boolean alias", { concurrency: false }, async () => {
   const { planner, cleanup } = await setupClients();
   const { default: piIntercomExtension } = await import("./index.ts");
   const sender = createExtensionHarness("tool-passive-sender", { hasUI: true });
@@ -682,11 +769,15 @@ test("intercom send passive opt-in is exposed through the public tool", { concur
     await waitForSessionByName(planner, "tool-passive-receiver");
 
     const intercomTool = sender.tools.find((tool) => tool.name === "intercom")!;
+    const parameters = intercomTool.parameters as { additionalProperties?: boolean; properties?: Record<string, unknown> };
+    assert.equal(parameters.additionalProperties, false);
+    assert.equal(Object.hasOwn(parameters.properties ?? {}, "passive"), false);
+
     const result = await intercomTool.execute("tool-passive-send", {
       action: "send",
       to: "tool-passive-receiver",
       message: "FYI for transcript only",
-      passive: true,
+      delivery: "passive",
     }, new AbortController().signal, undefined, sender.ctx);
 
     assert.equal(result.isError, false);
@@ -694,15 +785,6 @@ test("intercom send passive opt-in is exposed through the public tool", { concur
     await new Promise((resolve) => setImmediate(resolve));
     assert.match(receiver.sentMessages[0]?.message.content ?? "", /FYI for transcript only/);
     assert.equal(receiver.sentMessages[0]?.options, undefined);
-
-    const invalidPassiveResult = await intercomTool.execute("tool-passive-ask", {
-      action: "ask",
-      to: "tool-passive-receiver",
-      message: "Can this be passive?",
-      passive: true,
-    }, new AbortController().signal, undefined, sender.ctx);
-    assert.equal(invalidPassiveResult.isError, true);
-    assert.match(invalidPassiveResult.content[0]?.text ?? "", /only valid for action='send'/);
   } finally {
     await sender.emitLifecycle("session_shutdown");
     await receiver.emitLifecycle("session_shutdown");
@@ -2030,6 +2112,35 @@ test("intercom tool validates passive and replace delivery options", { concurren
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await cleanup();
+  }
+});
+
+test("config schema applies defaults and reports validation paths before falling back", { concurrency: false }, () => {
+  const configPath = path.join(sharedAgentDir, "intercom", "config.json");
+  const errors: string[] = [];
+  const originalConsoleError = console.error;
+
+  try {
+    mkdirSync(path.dirname(configPath), { recursive: true });
+    writeFileSync(configPath, JSON.stringify({ brokerCommand: "  bun  ", brokerArgs: [], unknownSetting: true }));
+    assert.deepEqual(loadConfig(), {
+      brokerCommand: "bun",
+      brokerArgs: [],
+      confirmSend: false,
+      enabled: true,
+      replyHint: true,
+      askTimeoutMs: 120000,
+      sendTimeoutMs: 8000,
+      listTimeoutMs: 5000,
+    });
+
+    console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
+    writeFileSync(configPath, JSON.stringify({ sendTimeoutMs: 499 }));
+    assert.equal(loadConfig().sendTimeoutMs, 8000);
+    assert.match(errors.join("\n"), /\/sendTimeoutMs must be >= 500/);
+  } finally {
+    console.error = originalConsoleError;
+    rmSync(configPath, { force: true });
   }
 });
 

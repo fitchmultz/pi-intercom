@@ -45,14 +45,14 @@ intercom({ action: "list" })
 
 | Action | Use for | Effect |
 | --- | --- | --- |
-| `send` | Context drops, progress, non-blocking notices | Wakes idle recipients and returns after broker acceptance; use `delivery:"queue"` for active-recipient follow-up, `delivery:"steer"` only for urgent course correction, and passive delivery only for human-visible breadcrumbs |
-| `ask` | Decisions, clarifications, ACKs needed now | Wakes/queues the recipient and waits up to `askTimeoutMs` (default 2 minutes); default asks to peers reporting `accepts_asks:false` return `delivered:true`, `replied:false`, `reason:"peer_idle"`, while explicit `delivery:"queue"`/`"steer"` asks still wait for a reply; not passive |
+| `send` | Context drops, progress, non-blocking notices | Wakes idle recipients and returns after broker acceptance; use `delivery:"queue"` for active-recipient follow-up, `delivery:"steer"` only for urgent course correction, and `delivery:"passive"` only for human-visible breadcrumbs |
+| `ask` | Decisions, clarifications, ACKs needed now | Wakes/queues the recipient and waits up to `askTimeoutMs` (default 2 minutes); default asks to peers reporting `accepts_asks:false` return `delivered:true`, `replied:false`, `reason:"peer_idle"`, while explicit `delivery:"queue"`/`"steer"` asks still wait for a reply; `delivery:"passive"` is send-only |
 | `reply` | Answering an inbound ask | Uses the active ask, or the single pending ask |
 | `pending` | Multiple or delayed inbound asks | Lists unresolved asks so you can disambiguate |
 | `status` | Troubleshooting connection state | Shows connection, active session count, and the same live recipient capability/guidance rows as `list` |
 
 5. Write compact messages with objective, scope, relevant files, stop boundary, and expected reply.
-6. For long work, use `send` for checkpoints the recipient agent should see, and use `ask` when a reply is required. Trust the `list`/`status` guidance rows: if the recipient is active, use `delivery:"queue"` for normal follow-up and `delivery:"steer"` only when its current path is likely wrong. Avoid passive delivery unless the note is only for the human transcript.
+6. For long work, use `send` for checkpoints the recipient agent should see, and use `ask` when a reply is required. Trust the `list`/`status` guidance rows: if the recipient is active, use `delivery:"queue"` for normal follow-up and `delivery:"steer"` only when its current path is likely wrong. Avoid `delivery:"passive"` unless the note is only for the human transcript.
 7. After tool results, continue from the reply or error. Do not assume delivery after a failed result.
 
 ## Common calls
@@ -184,6 +184,6 @@ Read `references/peer-sessions.md` before starting a new visible peer session. S
 A good intercom-assisted turn ends with:
 
 - Target came from `list` or from the active inbound ask.
-- Action matched intent: `send` for non-blocking/wake, `ask` for blocking, `reply` for inbound, `delivery:"queue"` for normal active-recipient follow-up, `delivery:"steer"` for urgent course correction, and passive delivery only when deliberately not waking the model.
+- Action matched intent: `send` for non-blocking/wake, `ask` for blocking, `reply` for inbound, `delivery:"queue"` for normal active-recipient follow-up, `delivery:"steer"` for urgent course correction, and `delivery:"passive"` only when deliberately not waking the model.
 - Delivery result or failure was handled.
 - Any spawned peer was smoke-tested and either still needed or cleaned up.

@@ -12,7 +12,7 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 - Added `queueMode:"replace"` with `threadId` to replace older undelivered intercom-staged messages in the same thread before handing them to Pi.
 
 ### Changed
-- Updated the local Pi development baseline and compatibility imports for Pi 0.80.6.
+- Updated the local Pi development baseline and compatibility imports for Pi 0.80.7.
 - `send` now wakes idle recipient agents by default and surfaces clearer guidance for active-recipient delivery; passive delivery is explicit via `delivery:"passive"` or legacy `passive:true` and discouraged for agent-to-agent coordination.
 
 ### Fixed

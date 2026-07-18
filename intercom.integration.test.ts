@@ -363,9 +363,6 @@ async function connectClient(
     name,
     cwd: repoDir,
     model: "test-model",
-    pid: process.pid,
-    startedAt: Date.now(),
-    lastActivity: Date.now(),
     ...overrides,
   });
 }
@@ -635,9 +632,6 @@ test("broker returns a clean delivery failure when forwarding would exceed the f
       name: "large-sender",
       cwd: "c".repeat(300_000),
       model: "m".repeat(100_000),
-      pid: process.pid,
-      startedAt: Date.now(),
-      lastActivity: Date.now(),
     });
     await connectClient(receiver, "large-receiver");
 
@@ -1116,7 +1110,7 @@ test("intercom tool accepts displayed short IDs when session names are duplicate
   }
 });
 
-test("compose overlay preserves pasted multiline handoffs and can send request-reply messages", async () => {
+test("compose overlay preserves complete bracketed pastes as literal content", async () => {
   const sent: Array<{ to: string; text: string; expectsReply: boolean | undefined }> = [];
   let renderRequests = 0;
   let doneResult: unknown;
@@ -1129,15 +1123,11 @@ test("compose overlay preserves pasted multiline handoffs and can send request-r
     },
     getKeys: (action: string) => action === "tui.select.confirm" ? ["Enter"] : ["Escape"],
   };
-  const theme = {
-    fg: (_name: string, text: string) => text,
-    bold: (text: string) => text,
-  };
   const overlay = new ComposeOverlay(
     { requestRender: () => { renderRequests += 1; } } as never,
-    theme as never,
+    { fg: (_name: string, text: string) => text, bold: (text: string) => text } as never,
     keybindings as never,
-    { id: "target-session", name: "worker", cwd: repoDir, model: "test-model", pid: 1, startedAt: 0, lastActivity: 0 } as SessionInfo,
+    { id: "target-session", name: "worker", cwd: repoDir, model: "test-model" },
     "worker",
     { send: async (to: string, options: { text: string; expectsReply: boolean }) => {
       sent.push({ to, text: options.text, expectsReply: options.expectsReply });
@@ -1146,8 +1136,10 @@ test("compose overlay preserves pasted multiline handoffs and can send request-r
     (result) => { doneResult = result; },
   );
 
-  overlay.handleInput("\x1b[200~\tLine 1\n\tLine 2\n\x1b[201~");
+  overlay.handleInput("\x1b[200~\tLine 1\r\n\tLine 2\r\x1b[201~");
   overlay.handleInput("\t");
+  overlay.handleInput("x");
+  overlay.handleInput("\x7f");
   const rendered = overlay.render(100).join("\n");
   assert.match(rendered, /Request reply to: worker/);
   assert.match(rendered, /Line 1/);
@@ -1156,95 +1148,22 @@ test("compose overlay preserves pasted multiline handoffs and can send request-r
   overlay.handleInput("\r");
   await new Promise((resolve) => setImmediate(resolve));
 
-  assert.equal(renderRequests >= 2, true);
+  assert.equal(renderRequests >= 4, true);
   assert.deepEqual(sent, [{ to: "target-session", text: "\tLine 1\n\tLine 2\n", expectsReply: true }]);
   assert.deepEqual(doneResult, { sent: true, messageId: "message-1", text: "\tLine 1\n\tLine 2\n", expectsReply: true });
 
-  sent.length = 0;
   doneResult = undefined;
-  const tabOnlyPasteOverlay = new ComposeOverlay(
-    { requestRender: () => { renderRequests += 1; } } as never,
-    theme as never,
+  const cancelOverlay = new ComposeOverlay(
+    { requestRender: () => undefined } as never,
+    { fg: (_name: string, text: string) => text, bold: (text: string) => text } as never,
     keybindings as never,
-    { id: "target-session", name: "worker", cwd: repoDir, model: "test-model", pid: 1, startedAt: 0, lastActivity: 0 } as SessionInfo,
+    { id: "target-session", name: "worker", cwd: repoDir, model: "test-model" },
     "worker",
-    { send: async (to: string, options: { text: string; expectsReply: boolean }) => {
-      sent.push({ to, text: options.text, expectsReply: options.expectsReply });
-      return { id: "message-2", accepted: true, delivered: true };
-    } } as never,
+    { send: async () => ({ id: "unused", accepted: true, delivered: true }) } as never,
     (result) => { doneResult = result; },
   );
-  tabOnlyPasteOverlay.handleInput("\x1b");
-  tabOnlyPasteOverlay.handleInput("[200~");
-  tabOnlyPasteOverlay.handleInput("\t");
-  tabOnlyPasteOverlay.handleInput("Indented");
-  tabOnlyPasteOverlay.handleInput("\x1b");
-  tabOnlyPasteOverlay.handleInput("[201~");
-  tabOnlyPasteOverlay.handleInput("\r");
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(sent, [{ to: "target-session", text: "\tIndented", expectsReply: false }]);
-
-  sent.length = 0;
-  const whitespacePasteOverlay = new ComposeOverlay(
-    { requestRender: () => { renderRequests += 1; } } as never,
-    theme as never,
-    keybindings as never,
-    { id: "target-session", name: "worker", cwd: repoDir, model: "test-model", pid: 1, startedAt: 0, lastActivity: 0 } as SessionInfo,
-    "worker",
-    { send: async (to: string, options: { text: string; expectsReply: boolean }) => {
-      sent.push({ to, text: options.text, expectsReply: options.expectsReply });
-      return { id: "message-3", accepted: true, delivered: true };
-    } } as never,
-    () => undefined,
-  );
-  whitespacePasteOverlay.handleInput("\x1b[200~\t\x1b[201~");
-  whitespacePasteOverlay.handleInput("\r");
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(sent, [{ to: "target-session", text: "\t", expectsReply: false }]);
-
-  sent.length = 0;
-  const splitMarkerOverlay = new ComposeOverlay(
-    { requestRender: () => { renderRequests += 1; } } as never,
-    theme as never,
-    keybindings as never,
-    { id: "target-session", name: "worker", cwd: repoDir, model: "test-model", pid: 1, startedAt: 0, lastActivity: 0 } as SessionInfo,
-    "worker",
-    { send: async (to: string, options: { text: string; expectsReply: boolean }) => {
-      sent.push({ to, text: options.text, expectsReply: options.expectsReply });
-      return { id: "message-4", delivered: true };
-    } } as never,
-    () => undefined,
-  );
-  splitMarkerOverlay.handleInput("\x1b");
-  splitMarkerOverlay.handleInput("[");
-  splitMarkerOverlay.invalidate();
-  splitMarkerOverlay.handleInput("200~\tSplit");
-  splitMarkerOverlay.handleInput("\x1b");
-  splitMarkerOverlay.handleInput("[");
-  splitMarkerOverlay.handleInput("201~");
-  splitMarkerOverlay.handleInput("\r");
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(sent, [{ to: "target-session", text: "\tSplit", expectsReply: false }]);
-
-  sent.length = 0;
-  const trailingEscOverlay = new ComposeOverlay(
-    { requestRender: () => { renderRequests += 1; } } as never,
-    theme as never,
-    keybindings as never,
-    { id: "target-session", name: "worker", cwd: repoDir, model: "test-model", pid: 1, startedAt: 0, lastActivity: 0 } as SessionInfo,
-    "worker",
-    { send: async (to: string, options: { text: string; expectsReply: boolean }) => {
-      sent.push({ to, text: options.text, expectsReply: options.expectsReply });
-      return { id: "message-5", delivered: true };
-    } } as never,
-    () => undefined,
-  );
-  trailingEscOverlay.handleInput("\x1b[200~abc\x1b");
-  trailingEscOverlay.handleInput("[");
-  trailingEscOverlay.handleInput("201~");
-  trailingEscOverlay.handleInput("\r");
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(sent, [{ to: "target-session", text: "abc", expectsReply: false }]);
+  cancelOverlay.handleInput("\x1b");
+  assert.deepEqual(doneResult, { sent: false });
 });
 
 test("sessions publish automatic lifecycle status", { concurrency: false }, async () => {
@@ -1771,6 +1690,7 @@ test("replace queue mode respects lifecycle busy state even when context idle la
     const target = await waitForSessionByName(planner, "lifecycle-busy-replace-worker");
     await harness.emitLifecycle("agent_start");
     await harness.emitLifecycle("tool_execution_start", { toolCallId: "sleep", toolName: "bash" });
+    await waitForSessionStatus(planner, "lifecycle-busy-replace-worker", "tool:bash");
 
     assert.equal((await planner.send(target.id, {
       messageId: "lifecycle-old",

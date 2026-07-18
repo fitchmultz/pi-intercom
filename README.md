@@ -24,7 +24,7 @@ Pi-intercom also integrates well with [pi-subagents](https://github.com/nicobail
 
 ## In One Minute
 
-Each pi session that has `pi-intercom` loaded and enabled connects to a tiny local broker over a local IPC transport. The broker keeps track of connected sessions and routes direct messages to the one you target by name or session ID. The extension gives you both a tool (`intercom`) and a small overlay UI (`/intercom` or `Alt+M`). Incoming messages wake idle recipients by default; active recipients see messages after the current tool call, when idle, or through explicit queue/steer delivery, and passive delivery is a discouraged opt-in for human-visible breadcrumbs only.
+Each pi session that has `pi-intercom` loaded connects to a tiny local broker over a local IPC transport. The broker keeps track of connected sessions and routes direct messages to the one you target by name or session ID. The extension gives you both a tool (`intercom`) and a small overlay UI (`/intercom` or `Alt+M`). Incoming messages wake idle recipients by default; active recipients see messages after the current tool call, when idle, or through explicit queue/steer delivery, and passive delivery is a discouraged opt-in for human-visible breadcrumbs only.
 
 ## Install
 
@@ -32,7 +32,7 @@ Each pi session that has `pi-intercom` loaded and enabled connects to a tiny loc
 pi install . --local
 ```
 
-Run that from this local fork checkout, then restart Pi in the project. The extension auto-connects to the broker on startup and registers the bundled `pi-intercom` skill for common coordination patterns.
+Run that from this local fork checkout with Pi 0.80.10 or newer, then restart Pi in the project. The extension auto-connects to the broker on startup and registers the bundled `pi-intercom` skill for common coordination patterns.
 
 ## Development
 
@@ -66,8 +66,7 @@ Coordinate with other local pi sessions on related codebases. Use `/skill:pi-int
 ```
 
 A session becomes intercom-connected when all of these are true:
-- the `pi-intercom` extension is installed and loaded in that session
-- `enabled` is not set to `false` in `${PI_CODING_AGENT_DIR:-~/.pi/agent}/intercom/config.json`
+- the `pi-intercom` extension is installed and enabled through `pi config`
 - the session has started or reloaded after the extension was installed
 - the local broker is running or can be auto-started
 
@@ -397,7 +396,6 @@ Create `${PI_CODING_AGENT_DIR:-~/.pi/agent}/intercom/config.json`:
   "brokerCommand": "npx",
   "brokerArgs": ["--no-install", "tsx"],
   "confirmSend": false,
-  "enabled": true,
   "replyHint": true,
   "askTimeoutMs": 120000,
   "sendTimeoutMs": 8000,
@@ -411,12 +409,13 @@ Create `${PI_CODING_AGENT_DIR:-~/.pi/agent}/intercom/config.json`:
 | `brokerCommand` | `"npx"` | Command used to start the local broker process when you override the default |
 | `brokerArgs` | `["--no-install", "tsx"]` | Arguments passed to `brokerCommand` before the broker script path. The built-in default launches the package-local `tsx` CLI through the current Node executable to avoid shell/shim issues. |
 | `confirmSend` | false | Show a confirmation dialog before non-reply sends from an interactive session with UI |
-| `enabled` | true | Enable/disable intercom entirely |
 | `replyHint` | true | Include reply instructions in incoming asks |
 | `askTimeoutMs` | `120000` | Reply wait timeout for `ask` and blocking supervisor requests |
 | `sendTimeoutMs` | `8000` | Broker delivery-ack timeout for sends/asks |
 | `listTimeoutMs` | `5000` | Session-list response timeout |
 | `status` | — | Optional custom status suffix shown after the automatic lifecycle status, for example `thinking · researching` |
+
+Use `pi config` to enable or disable the extension. The former `config.json` `enabled` key is no longer read; in particular, an existing `"enabled": false` does not disable intercom after this migration.
 
 For example, if you have Bun installed and want it to start the broker directly, use:
 
@@ -455,9 +454,9 @@ graph TB
     B2 <-->|Local Socket/Pipe| B3
 ```
 
-The broker is a standalone TypeScript process that manages session registration and message routing. It auto-spawns when the first intercom-enabled session needs it and exits after 5 seconds when the last connected session disconnects. Clients now reconnect automatically if the broker disappears and later comes back.
+The broker is a standalone TypeScript process that manages session registration and message routing. It auto-spawns when the first intercom session needs it and exits after 5 seconds when the last connected session disconnects. Clients now reconnect automatically if the broker disappears and later comes back.
 
-Messages use length-prefixed JSON over a local socket/pipe transport (4-byte length + JSON payload) to handle fragmentation properly. The protocol includes request correlation for session listing, explicit delivery failures, and validation for malformed or out-of-order messages.
+Messages use length-prefixed JSON over a local socket/pipe transport (4-byte length + JSON payload) to handle fragmentation properly. The protocol includes request correlation for session listing, explicit delivery failures, and validation for malformed or out-of-order messages. Session registration carries user-facing identity plus live health fields; process ID, start time, and the redundant activity timestamp are no longer part of the protocol.
 
 Async extension work (startup, inbound flushes, reconnects, overlays, and relays) no-ops if the session shuts down or reloads before it settles.
 

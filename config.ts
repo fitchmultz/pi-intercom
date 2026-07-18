@@ -14,10 +14,7 @@ export interface IntercomConfig {
 
   /** Optional custom status suffix shown after automatic lifecycle status */
   status?: string;
-  
-  /** Enable/disable intercom (default: true) */
-  enabled: boolean;
-  
+
   /** Show reply hint in incoming messages (default: true) */
   replyHint: boolean;
 
@@ -39,7 +36,6 @@ const defaults: IntercomConfig = {
   brokerCommand: "npx",
   brokerArgs: ["--no-install", "tsx"],
   confirmSend: false,
-  enabled: true,
   replyHint: true,
   askTimeoutMs: 2 * 60 * 1000,
   sendTimeoutMs: 8000,
@@ -92,13 +88,6 @@ export function loadConfig(): IntercomConfig {
         throw new Error(`"confirmSend" must be a boolean`);
       }
       config.confirmSend = parsedConfig.confirmSend;
-    }
-
-    if (Object.hasOwn(parsedConfig, "enabled")) {
-      if (typeof parsedConfig.enabled !== "boolean") {
-        throw new Error(`"enabled" must be a boolean`);
-      }
-      config.enabled = parsedConfig.enabled;
     }
 
     if (Object.hasOwn(parsedConfig, "replyHint")) {

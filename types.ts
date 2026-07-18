@@ -3,9 +3,6 @@ export interface SessionInfo {
   name?: string;
   cwd: string;
   model: string;
-  pid: number;
-  startedAt: number;
-  lastActivity: number;
   status?: string;
   /** Last time the broker observed any activity from this session (liveness). */
   lastSeen?: number;
@@ -145,21 +142,23 @@ export function isMessage(value: unknown): value is Message {
     || (Array.isArray(content.attachments) && content.attachments.every(isAttachment));
 }
 
-export type ClientMessage =
-  | { type: "register"; session: Omit<SessionInfo, "id"> }
-  | { type: "unregister" }
-  | { type: "list"; requestId: string }
-  | { type: "send"; to: string; message: Message }
-  | { type: "presence"; name?: string; status?: string; model?: string; pendingAsks?: number; acceptsAsks?: boolean; lastIntercomActivity?: number };
+export function isSessionRegistration(value: unknown): value is Omit<SessionInfo, "id"> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const session = value as Record<string, unknown>;
+  if (typeof session.cwd !== "string" || typeof session.model !== "string") return false;
+  if (session.name !== undefined && typeof session.name !== "string") return false;
+  if (session.status !== undefined && typeof session.status !== "string") return false;
+  if (session.lastSeen !== undefined && typeof session.lastSeen !== "number") return false;
+  if (session.lastIntercomActivity !== undefined && typeof session.lastIntercomActivity !== "number") return false;
+  if (session.pendingAsks !== undefined && typeof session.pendingAsks !== "number") return false;
+  return session.acceptsAsks === undefined || typeof session.acceptsAsks === "boolean";
+}
 
 export type BrokerMessage =
   | { type: "registered"; sessionId: string }
   | { type: "sessions"; requestId: string; sessions: SessionInfo[] }
   | { type: "message"; from: SessionInfo; message: Message }
-  | { type: "presence_update"; session: SessionInfo }
-  | { type: "session_joined"; session: SessionInfo }
   | { type: "session_left"; sessionId: string }
-  | { type: "error"; error: string }
   | { type: "delivered"; messageId: string }
   | { type: "delivery_queued"; messageId: string; reason: string }
   | { type: "delivery_failed"; messageId: string; reason: string };

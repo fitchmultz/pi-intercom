@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
-import { IntercomClient } from "./broker/client.ts";
+import { IntercomClient, type SendResult } from "./broker/client.ts";
 import { spawnBrokerIfNeeded } from "./broker/spawn.ts";
 import { SessionListOverlay } from "./ui/session-list.ts";
 import { ComposeOverlay, type ComposeResult } from "./ui/compose.ts";
@@ -535,6 +535,12 @@ class ToolExecutionFailure extends Error {
   }
 }
 
+class AskDeliveryError extends Error {
+  constructor(readonly result: SendResult) {
+    super(result.reason ?? "Session may not exist or has disconnected.");
+  }
+}
+
 function throwIfToolError<T extends ToolResultLike>(result: T): T {
   if (!result.isError) return result;
   throw new ToolExecutionFailure(firstTextContent(result) || "Tool failed", result.details);
@@ -551,7 +557,6 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   let runtimeContext: ExtensionContext | null = null;
   let currentSessionId: string | null = null;
   let currentModel = "unknown";
-  let sessionStartedAt: number | null = null;
   let reconnectTimer: NodeJS.Timeout | null = null;
   let reconnectPromise: Promise<IntercomClient> | null = null;
   let reconnectPromiseGeneration: number | null = null;
@@ -617,6 +622,34 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       rejectReplyWaiter(new Error(`Reply peer disconnected before answering: ${sessionId}`));
     }
   }
+  async function sendAskTransaction(
+    activeClient: IntercomClient,
+    to: string,
+    questionId: string,
+    options: Parameters<IntercomClient["send"]>[1],
+    signal: AbortSignal | undefined,
+    onSent: (result: SendResult) => void,
+  ): Promise<Message> {
+    const replyPromise = waitForReply(to, questionId, signal);
+    replyPromise.catch(() => undefined);
+    try {
+      if (signal?.aborted) throw new Error("Cancelled");
+      const result = await activeClient.send(to, { ...options, messageId: questionId, expectsReply: true });
+      if (!result.accepted) throw new AskDeliveryError(result);
+      markIntercomActivity();
+      syncPresenceStatus();
+      onSent(result);
+      return await replyPromise;
+    } catch (error) {
+      rejectReplyWaiter(toError(error));
+      try {
+        await replyPromise;
+      } catch {
+        // Cleanup only; preserve the transaction failure.
+      }
+      throw error;
+    }
+  }
   function clearReconnectTimer(): void {
     if (!reconnectTimer) {
       return;
@@ -675,20 +708,16 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   }
   function buildRegistration(): Omit<SessionInfo, "id"> {
     const liveContext = getLiveContext();
-    if (!liveContext || !currentSessionId || sessionStartedAt === null) {
+    if (!liveContext || !currentSessionId) {
       throw new Error("Intercom runtime not initialized");
     }
 
     const identity = buildPresenceIdentity(pi, currentSessionId);
-    const now = Date.now();
     return {
       name: identity.name,
       cwd: liveContext.cwd ?? process.cwd(),
       model: currentModel,
-      pid: process.pid,
-      startedAt: sessionStartedAt,
-      lastActivity: now,
-      lastSeen: now,
+      lastSeen: Date.now(),
       status: currentStatus(),
       ...buildPresenceHealth(),
     };
@@ -1040,9 +1069,6 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }, getReconnectDelayMs());
   }
   async function ensureConnected(reason: "startup" | "background" | "tool" | "overlay"): Promise<IntercomClient> {
-    if (!config.enabled) {
-      throw new Error("Intercom disabled");
-    }
     if (disposed) {
       throw new Error("Intercom shutting down");
     }
@@ -1051,7 +1077,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     const contextAtStart = getLiveContext();
     const generationAtStart = runtimeGeneration;
-    if (!contextAtStart || !currentSessionId || sessionStartedAt === null) {
+    if (!contextAtStart || !currentSessionId) {
       throw new Error("Intercom runtime not initialized");
     }
     clearReconnectTimer();
@@ -1128,9 +1154,6 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         name: sender,
         cwd: runtimeContext?.cwd ?? process.cwd(),
         model: sender,
-        pid: process.pid,
-        startedAt: now,
-        lastActivity: now,
         status,
       },
       message: {
@@ -1271,9 +1294,6 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       eventUnsubscribes = registerSubagentEventBridges();
       eventBridgesActive = true;
     }
-    if (!config.enabled) {
-      return;
-    }
     disposed = false;
     runtimeStarted = true;
     runtimeGeneration += 1;
@@ -1283,7 +1303,6 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     runtimeContext = ctx;
     currentSessionId = ctx.sessionManager.getSessionId();
     currentModel = ctx.model?.id ?? "unknown";
-    sessionStartedAt = Date.now();
     agentRunning = false;
     lastIntercomActivity = 0;
     activeTools.clear();
@@ -1329,7 +1348,6 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     runtimeContext = null;
     currentSessionId = null;
-    sessionStartedAt = null;
   });
   pi.on("turn_end", () => {
     if (!getLiveContext()) {
@@ -1579,62 +1597,24 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           };
         }
 
-        let replyPromise: Promise<Message> | null = null;
+        const questionId = randomUUID();
+        const requestText = reason === "interview_request"
+          ? formatChildOrchestratorMessage("interview", metadata, formatSupervisorInterviewRequest(supervisorInterview!, typeof params.message === "string" ? params.message : undefined))
+          : formatChildOrchestratorMessage("ask", metadata, params.message as string);
         try {
-          const questionId = randomUUID();
-          replyPromise = waitForReply(sendTo, questionId, signal);
-          replyPromise.catch(() => undefined);
-          if (signal?.aborted) {
-            rejectReplyWaiter(new Error("Cancelled"));
-            try {
-              await replyPromise;
-            } catch {
-              // The waiter was intentionally rejected above; the tool result reports cancellation.
-            }
-            return {
-              content: [{ type: "text", text: "Cancelled" }],
-              isError: true,
-              details: { error: true },
-            };
-          }
-          const requestText = reason === "interview_request"
-            ? formatChildOrchestratorMessage("interview", metadata, formatSupervisorInterviewRequest(supervisorInterview!, typeof params.message === "string" ? params.message : undefined))
-            : formatChildOrchestratorMessage("ask", metadata, params.message as string);
-          const sendResult = await connectedClient.send(sendTo, {
-            messageId: questionId,
-            text: requestText,
-            expectsReply: true,
+          const replyMessage = await sendAskTransaction(connectedClient, sendTo, questionId, { text: requestText }, signal, (sendResult) => {
+            pi.appendEntry("intercom_sent", {
+              to: metadata.orchestratorTarget,
+              message: {
+                text: reason === "interview_request" ? requestText : params.message,
+                reason,
+                ...(reason === "interview_request" ? { interview: supervisorInterview } : {}),
+              },
+              messageId: sendResult.id,
+              timestamp: Date.now(),
+              subagent: { runId: metadata.runId, agent: metadata.agent, index: metadata.index },
+            });
           });
-          if (!sendResult.accepted) {
-            const errorText = sendResult.reason ?? "Session may not exist or has disconnected.";
-            if (replyPromise) {
-              rejectReplyWaiter(new Error(`Message to "${metadata.orchestratorTarget}" was not delivered: ${errorText}`));
-              try {
-                await replyPromise;
-              } catch {
-                // The waiter was already rejected above. Keep the delivery failure as the only error here.
-              }
-            }
-            return {
-              content: [{ type: "text", text: `Message to "${metadata.orchestratorTarget}" was not delivered: ${errorText}` }],
-              isError: true,
-              details: { error: true },
-            };
-          }
-          markIntercomActivity();
-          syncPresenceStatus();
-          pi.appendEntry("intercom_sent", {
-            to: metadata.orchestratorTarget,
-            message: {
-              text: reason === "interview_request" ? requestText : params.message,
-              reason,
-              ...(reason === "interview_request" ? { interview: supervisorInterview } : {}),
-            },
-            messageId: sendResult.id,
-            timestamp: Date.now(),
-            subagent: { runId: metadata.runId, agent: metadata.agent, index: metadata.index },
-          });
-          const replyMessage = await replyPromise;
           const replyText = replyMessage.content.text;
           const replyAttachments = replyMessage.content.attachments?.length
             ? formatAttachments(replyMessage.content.attachments)
@@ -1655,16 +1635,16 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
               : {}),
           };
         } catch (error) {
-          rejectReplyWaiter(toError(error));
-          if (replyPromise) {
-            try {
-              await replyPromise;
-            } catch {
-              // The waiter is cleanup-only on this path. The real failure is the one from the outer catch.
-            }
+          if (error instanceof AskDeliveryError) {
+            return {
+              content: [{ type: "text", text: `Message to "${metadata.orchestratorTarget}" was not delivered: ${error.message}` }],
+              isError: true,
+              details: { error: true },
+            };
           }
+          const errorMessage = getErrorMessage(error);
           return {
-            content: [{ type: "text", text: `Failed: ${getErrorMessage(error)}` }],
+            content: [{ type: "text", text: errorMessage === "Cancelled" ? "Cancelled" : `Failed: ${errorMessage}` }],
             isError: true,
             details: { error: true },
           };
@@ -1947,7 +1927,6 @@ Usage:
               details: { error: true },
             };
           }
-          let replyPromise: Promise<Message> | null = null;
           let questionId: string | undefined;
 
           try {
@@ -1976,54 +1955,34 @@ Usage:
               };
             }
             questionId = randomUUID();
-            if (!peerIdle) {
-              replyPromise = waitForReply(sendTo, questionId, _signal);
-              replyPromise.catch(() => undefined);
-            }
-            const sendResult = await connectedClient.send(sendTo, {
-              messageId: questionId,
+            const sendOptions = {
               text: message,
               attachments,
               replyTo,
-              expectsReply: true,
               delivery: deliveryMode,
               queueMode: queueMode as QueueMode | undefined,
               threadId: cleanedThreadId,
-            });
-
-            if (!sendResult.accepted) {
-              const errorText = sendResult.reason ?? "Session may not exist or has disconnected.";
-              if (replyPromise) {
-                rejectReplyWaiter(new Error(`Message to "${to}" was not delivered: ${errorText}`));
-                try {
-                  await replyPromise;
-                } catch {
-                  // The waiter was already rejected above. Keep the delivery failure as the only error here.
-                }
-              }
-              return {
-                content: [{ type: "text", text: `Message to "${to}" was not delivered: ${errorText}` }],
-                isError: true,
-                details: failureDetails("delivery_failed", [{ action: "list" }, { action: "send", guidance: "Retry with an exact active recipient target." }], { error: true, messageId: sendResult.id, accepted: false, delivered: false, reason: sendResult.reason }),
-              };
-            }
-            markIntercomActivity();
-            syncPresenceStatus();
-            pi.appendEntry("intercom_sent", {
+            };
+            const recordSent = (sendResult: SendResult) => pi.appendEntry("intercom_sent", {
               to,
               message: { text: message, attachments, replyTo, delivery: deliveryMode, queueMode, threadId: cleanedThreadId },
               messageId: sendResult.id,
               timestamp: Date.now(),
             });
+            let replyMessage: Message;
             if (peerIdle) {
-              // Peer published acceptsAsks=false: deliver the ask so it is not lost, but do not wait for a reply.
+              const sendResult = await connectedClient.send(sendTo, { ...sendOptions, messageId: questionId, expectsReply: true });
+              if (!sendResult.accepted) throw new AskDeliveryError(sendResult);
+              markIntercomActivity();
+              syncPresenceStatus();
+              recordSent(sendResult);
               return {
                 content: [{ type: "text", text: `Delivered ask to ${to}; peer reports it is not accepting asks right now (peer_idle).` }],
                 isError: false,
                 details: { messageId: sendResult.id, delivered: true, replied: false, reason: "peer_idle", reasonCode: "recipient_not_accepting_asks", nextActions: [{ action: "send", guidance: "Use queue for normal follow-up or steer only for urgent redirection." }] },
               };
             }
-            const replyMessage = await replyPromise!;
+            replyMessage = await sendAskTransaction(connectedClient, sendTo, questionId, sendOptions, _signal, recordSent);
             const replyText = replyMessage.content.text;
             const replyAttachments = replyMessage.content.attachments?.length
               ? formatAttachments(replyMessage.content.attachments)
@@ -2047,13 +2006,12 @@ Usage:
               isError: false,
             };
           } catch (error) {
-            rejectReplyWaiter(toError(error));
-            if (replyPromise) {
-              try {
-                await replyPromise;
-              } catch {
-                // The waiter is cleanup-only on this path. The real failure is the one from the outer catch.
-              }
+            if (error instanceof AskDeliveryError) {
+              return {
+                content: [{ type: "text", text: `Message to "${to}" was not delivered: ${error.message}` }],
+                isError: true,
+                details: failureDetails("delivery_failed", [{ action: "list" }, { action: "send", guidance: "Retry with an exact active recipient target." }], { error: true, messageId: error.result.id, accepted: false, delivered: false, reason: error.result.reason }),
+              };
             }
             const errorMessage = getErrorMessage(error);
             const timedOut = errorMessage.startsWith("No reply from");
@@ -2244,7 +2202,7 @@ Usage:
     }
 
     const selectedSession = await ctx.ui.custom<SessionInfo | undefined>(
-      (_tui, theme, keybindings, done) => new SessionListOverlay(theme, keybindings, currentSession, sessions, done),
+      (tui, theme, keybindings, done) => new SessionListOverlay(tui, theme, keybindings, currentSession, sessions, done),
       { overlay: true }
     ).catch(() => undefined);
 

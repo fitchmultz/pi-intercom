@@ -5,7 +5,7 @@ import { randomUUID } from "crypto";
 import { getPiAgentDir } from "../agent-dir.js";
 import { writeMessage, createMessageReader, validateIntercomMessageSize } from "./framing.js";
 import { getBrokerSocketPath } from "./paths.js";
-import { isMessage } from "../types.js";
+import { isMessage, isSessionRegistration } from "../types.js";
 import type { SessionInfo, Message, BrokerMessage } from "../types.js";
 
 const INTERCOM_DIR = join(getPiAgentDir(), "intercom");
@@ -25,46 +25,6 @@ interface PendingReplaceDelivery {
   toId: string;
   message: Message;
   timer: NodeJS.Timeout;
-}
-
-function isSessionRegistration(value: unknown): value is Omit<SessionInfo, "id"> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return false;
-  }
-
-  const session = value as Record<string, unknown>;
-
-  if (
-    typeof session.cwd !== "string"
-    || typeof session.model !== "string"
-    || typeof session.pid !== "number"
-    || typeof session.startedAt !== "number"
-    || typeof session.lastActivity !== "number"
-  ) {
-    return false;
-  }
-
-  if (session.name !== undefined && typeof session.name !== "string") {
-    return false;
-  }
-
-  if (session.status !== undefined && typeof session.status !== "string") {
-    return false;
-  }
-
-  if (session.lastSeen !== undefined && typeof session.lastSeen !== "number") {
-    return false;
-  }
-
-  if (session.lastIntercomActivity !== undefined && typeof session.lastIntercomActivity !== "number") {
-    return false;
-  }
-
-  if (session.pendingAsks !== undefined && typeof session.pendingAsks !== "number") {
-    return false;
-  }
-
-  return session.acceptsAsks === undefined || typeof session.acceptsAsks === "boolean";
 }
 
 class IntercomBroker {
@@ -180,7 +140,6 @@ class IntercomBroker {
         }
 
         writeMessage(socket, { type: "registered", sessionId: id });
-        this.broadcast({ type: "session_joined", session: info }, id);
         break;
       }
 
@@ -320,10 +279,7 @@ class IntercomBroker {
             }
             session.info.lastIntercomActivity = clientMessage.lastIntercomActivity;
           }
-          const now = Date.now();
-          session.info.lastActivity = now;
-          session.info.lastSeen = now;
-          this.broadcast({ type: "presence_update", session: session.info }, currentId);
+          session.info.lastSeen = Date.now();
         }
         break;
       }

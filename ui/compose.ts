@@ -3,9 +3,9 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import type { IntercomClient } from "../broker/client.js";
 import type { SessionInfo } from "../types.js";
-import { ComposeInputNormalizer } from "./compose-input.js";
 
-const ESC_PENDING_TIMEOUT_MS = 25;
+const BRACKETED_PASTE_START = "\x1b[200~";
+const BRACKETED_PASTE_END = "\x1b[201~";
 
 export interface ComposeResult {
   sent: boolean;
@@ -24,9 +24,6 @@ export class ComposeOverlay implements Component {
   private done: (result: ComposeResult) => void;
   private inputBuffer: string = "";
   private mode: "send" | "ask" = "send";
-  private normalizer = new ComposeInputNormalizer();
-  private pendingEscape: string | null = null;
-  private pendingEscapeTimer: NodeJS.Timeout | null = null;
   private completed = false;
   private sending: boolean = false;
   private error: string | null = null;
@@ -54,66 +51,39 @@ export class ComposeOverlay implements Component {
   private finish(result: ComposeResult): void {
     if (this.completed) return;
     this.completed = true;
-    this.clearPendingEscape();
-    this.normalizer.reset();
     this.done(result);
-  }
-
-  private clearPendingEscape(): void {
-    if (this.pendingEscapeTimer) {
-      clearTimeout(this.pendingEscapeTimer);
-      this.pendingEscapeTimer = null;
-    }
-    this.pendingEscape = null;
-  }
-
-  private holdPendingEscape(): void {
-    this.pendingEscape = "\x1b";
-    this.pendingEscapeTimer = setTimeout(() => {
-      if (this.pendingEscape === "\x1b") {
-        this.finish({ sent: false });
-      }
-    }, ESC_PENDING_TIMEOUT_MS);
   }
 
   handleInput(data: string): void {
     if (this.sending || this.completed) return;
 
-    if (this.pendingEscape) {
-      this.clearPendingEscape();
-      data = "\x1b" + data;
-    } else if (data === "\x1b") {
-      this.holdPendingEscape();
-      return;
-    }
-
-    if (this.keybindings.matches(data, "tui.select.cancel")) {
+    const pasted = data.startsWith(BRACKETED_PASTE_START) && data.endsWith(BRACKETED_PASTE_END);
+    if (pasted) {
+      data = data.slice(BRACKETED_PASTE_START.length, -BRACKETED_PASTE_END.length).replace(/\r\n?/g, "\n");
+    } else if (this.keybindings.matches(data, "tui.select.cancel")) {
       this.finish({ sent: false });
       return;
     }
-
-    const normalized = this.normalizer.normalize(data);
-    data = normalized.text;
     if (!data) return;
 
-    if (!normalized.bracketedPaste && data === "\t") {
+    if (!pasted && data === "\t") {
       this.mode = this.mode === "send" ? "ask" : "send";
       this.tui.requestRender();
       return;
     }
 
-    if (data.startsWith("\x1b")) {
+    if (!pasted && data.startsWith("\x1b")) {
       return;
     }
 
-    if (this.keybindings.matches(data, "tui.select.confirm")) {
+    if (!pasted && this.keybindings.matches(data, "tui.select.confirm")) {
       if (this.inputBuffer.length > 0) {
         void this.sendMessage();
       }
       return;
     }
 
-    if (this.keybindings.matches(data, "tui.editor.deleteCharBackward")) {
+    if (!pasted && this.keybindings.matches(data, "tui.editor.deleteCharBackward")) {
       this.inputBuffer = [...this.inputBuffer].slice(0, -1).join("");
       this.tui.requestRender();
       return;

@@ -9,9 +9,6 @@ function createSession(id: string, name: string): SessionInfo {
     name,
     cwd: "/tmp/project",
     model: "test-model",
-    pid: 1,
-    startedAt: 1,
-    lastActivity: 1,
   };
 }
 

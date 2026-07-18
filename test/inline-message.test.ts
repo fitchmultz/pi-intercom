@@ -16,9 +16,6 @@ const from: SessionInfo = {
   name: "sender",
   cwd: "/tmp/project",
   model: "model",
-  pid: 1,
-  startedAt: 0,
-  lastActivity: 0,
 };
 
 const message: Message = {

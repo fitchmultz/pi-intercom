@@ -3,7 +3,7 @@ import net from "net";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.js";
 import { getBrokerSocketPath } from "./paths.js";
-import { isMessage } from "../types.js";
+import { isMessage, isSessionRegistration } from "../types.js";
 import type { SessionInfo, Message, Attachment, MessageDelivery, QueueMode } from "../types.js";
 
 const BROKER_SOCKET = getBrokerSocketPath();
@@ -45,44 +45,9 @@ function toError(error: unknown): Error {
 }
 
 function isSessionInfo(value: unknown): value is SessionInfo {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-
-  const session = value as Record<string, unknown>;
-
-  if (
-    typeof session.id !== "string"
-    || typeof session.cwd !== "string"
-    || typeof session.model !== "string"
-    || typeof session.pid !== "number"
-    || typeof session.startedAt !== "number"
-    || typeof session.lastActivity !== "number"
-  ) {
-    return false;
-  }
-
-  if (session.name !== undefined && typeof session.name !== "string") {
-    return false;
-  }
-
-  if (session.status !== undefined && typeof session.status !== "string") {
-    return false;
-  }
-
-  if (session.lastSeen !== undefined && typeof session.lastSeen !== "number") {
-    return false;
-  }
-
-  if (session.lastIntercomActivity !== undefined && typeof session.lastIntercomActivity !== "number") {
-    return false;
-  }
-
-  if (session.pendingAsks !== undefined && typeof session.pendingAsks !== "number") {
-    return false;
-  }
-
-  return session.acceptsAsks === undefined || typeof session.acceptsAsks === "boolean";
+  return typeof value === "object" && value !== null
+    && typeof (value as { id?: unknown }).id === "string"
+    && isSessionRegistration(value);
 }
 
 export class IntercomClient extends EventEmitter {
@@ -360,39 +325,12 @@ export class IntercomClient extends EventEmitter {
         break;
       }
 
-      case "session_joined": {
-        if (!isSessionInfo(brokerMessage.session)) {
-          throw new Error("Invalid session_joined message");
-        }
-
-        this.emit("session_joined", brokerMessage.session);
-        break;
-      }
-
       case "session_left": {
         if (typeof brokerMessage.sessionId !== "string") {
           throw new Error("Invalid session_left message");
         }
 
         this.emit("session_left", brokerMessage.sessionId);
-        break;
-      }
-
-      case "presence_update": {
-        if (!isSessionInfo(brokerMessage.session)) {
-          throw new Error("Invalid presence_update message");
-        }
-
-        this.emit("presence_update", brokerMessage.session);
-        break;
-      }
-
-      case "error": {
-        if (typeof brokerMessage.error !== "string") {
-          throw new Error("Invalid error message");
-        }
-
-        this.emit("error", new Error(brokerMessage.error));
         break;
       }
 

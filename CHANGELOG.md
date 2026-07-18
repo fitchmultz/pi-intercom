@@ -12,8 +12,13 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 - Added `queueMode:"replace"` with `threadId` to replace older undelivered intercom-staged messages in the same thread before handing them to Pi.
 
 ### Changed
-- Updated the local Pi development baseline and compatibility audit for Pi 0.80.9; intercom remains on the extension-facing `ModelRegistry` contract and needs no SDK `ModelRuntime` migration.
+- Raised the minimum `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` compatibility to 0.80.10. Compose now relies on Pi's complete terminal input framing, and the session picker uses the native `SelectList` navigation, scrolling, and truncation behavior.
 - `send` now wakes idle recipient agents by default and surfaces clearer guidance for active-recipient delivery; passive delivery is explicit via `delivery:"passive"` or legacy `passive:true` and discouraged for agent-to-agent coordination.
+- Session registration no longer carries the unused `pid`, `startedAt`, or `lastActivity` fields. Health reporting continues through `lastSeen` and `lastIntercomActivity`.
+
+### Removed
+- Removed unused broker `session_joined`, `presence_update`, and error events; active `session_left`, correlated session lists, messages, and delivery acknowledgements are unchanged.
+- Removed the intercom `config.json` `enabled` setting. Use `pi config` to enable or disable the package; existing `"enabled": false` values are ignored.
 
 ### Fixed
 - Busy non-interactive recipients now receive default non-reply sends after the current tool call, and queued replace-mode sends coalesce to the latest visible message instead of being dropped or delivered too late.

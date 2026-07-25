@@ -12,7 +12,7 @@ Coordinate named Pi sessions on the same machine with the least context loss and
 ## Source of truth
 
 - `intercom({ action: "list" })` is the source of truth for targetable sessions. It shows only intercom-connected sessions, not every Pi process, with live ask capability, busy/idle/unknown state, recent intercom activity, and delivery guidance. The current-session row is not targetable; choose a peer from Other sessions.
-- Tool behavior comes from this package's `index.ts` and `README.md`; inspect them if examples drift.
+- Tool call shapes and options live in the live `intercom` / `contact_supervisor` schemas and this package's `README.md` / `index.ts`. Read those when a parameter detail is needed; do not invent fields.
 - Pi CLI flags for local peer sessions are `--name`, `--extension`, and `--skill`.
 
 ## Use when
@@ -30,16 +30,12 @@ Coordinate named Pi sessions on the same machine with the least context loss and
 - The task is unrelated to the recipient's repo or role.
 - A normal `subagent` run is enough and no visible peer conversation is needed.
 - The message would expose secrets, tokens, passwords, private data, or unrelated user context without explicit approval.
+- Routine subagent completion or final handoff; return that through `pi-subagents`, not intercom/`contact_supervisor`.
 
 ## Default workflow
 
 1. Decide whether a peer is actually needed. If not, keep working locally.
-2. Discover targets before sending:
-
-```typescript
-intercom({ action: "list" })
-```
-
+2. Discover targets with `intercom({ action: "list" })` before sending.
 3. Pick the displayed name or target ID exactly. If names collide, use the target shown by `list`. Never message the current session.
 4. Choose the lightest action:
 
@@ -51,94 +47,17 @@ intercom({ action: "list" })
 | `pending` | Multiple or delayed inbound asks | Lists unresolved asks so you can disambiguate |
 | `status` | Troubleshooting connection state | Shows connection, active session count, and the same live recipient capability/guidance rows as `list` |
 
-5. Write compact messages with objective, scope, relevant files, stop boundary, and expected reply.
-6. For long work, use `send` for checkpoints the recipient agent should see, and use `ask` when a reply is required. Trust the `list`/`status` guidance rows: if the recipient is active, use `delivery:"queue"` for normal follow-up and `delivery:"steer"` only when its current path is likely wrong. Avoid passive delivery unless the note is only for the human transcript.
+5. Write compact messages with objective, scope, relevant files, stop boundary, and expected reply. Attachments only when the recipient needs the extra context.
+6. For long work, `send` checkpoints the recipient agent should see; `ask` when a reply is required. Trust `list`/`status` guidance: active recipient → `delivery:"queue"` for normal follow-up, `delivery:"steer"` only when its current path is likely wrong, passive only for human-transcript breadcrumbs. Optional `delivery:"queue", queueMode:"replace", threadId:"<non-empty>"` keeps only the latest undelivered update for that thread.
 7. After tool results, continue from the reply or error. Do not assume delivery after a failed result.
-
-## Common calls
-
-List and troubleshoot:
-
-```typescript
-intercom({ action: "list" })
-intercom({ action: "status" })
-```
-
-Delegate work and wake the worker:
-
-```typescript
-intercom({
-  action: "ask",
-  to: "worker",
-  message: "Task: inspect src/api/client.ts for retry bugs. Reply ACK, ask if blocked, and stop before changing public error shapes."
-})
-```
-
-Send non-blocking context:
-
-```typescript
-intercom({
-  action: "send",
-  to: "planner",
-  message: "Progress: retry bug is in fetchWithTimeout, not the API client. Continuing there."
-})
-```
-
-Queue or replace updates for a peer:
-
-```typescript
-intercom({
-  action: "send",
-  to: "worker",
-  delivery: "queue",
-  queueMode: "replace",
-  threadId: "retry-plan",
-  message: "Updated plan: ignore api/client.ts; inspect fetchWithTimeout instead."
-})
-```
-
-Reply to the ask that triggered the current turn:
-
-```typescript
-intercom({ action: "reply", message: "Use exponential backoff, max 3 retries." })
-```
-
-Disambiguate delayed or multiple pending asks:
-
-```typescript
-intercom({ action: "pending" })
-intercom({ action: "reply", to: "worker", message: "Use the stable API." })
-```
-
-Send attachments only when the recipient needs the extra context:
-
-```typescript
-intercom({
-  action: "send",
-  to: "worker",
-  message: "Relevant helper:",
-  attachments: [{
-    type: "snippet",
-    name: "retry.ts",
-    language: "typescript",
-    content: "export function shouldRetry(status: number) { return status >= 500; }"
-  }]
-})
-```
 
 ## Supervisor escalations from pi-subagents
 
-When a delegated child can reach the orchestrator, `pi-subagents` may provide a child-only `contact_supervisor` tool. Use it from the child when it is present; normal sessions use `intercom`. Do not assume `contact_supervisor` exists unless the tool is present.
+When present, child sessions get a child-only `contact_supervisor` tool; normal sessions use `intercom`. Do not assume `contact_supervisor` exists unless the tool is listed.
 
-Child-side rule: use `contact_supervisor` for `need_decision`, `interview_request`, or meaningful `progress_update`. Do not use it for routine completion; return final results through `pi-subagents`.
+Child-side reasons only: `need_decision`, `interview_request`, or meaningful `progress_update`.
 
-If you are the supervisor and receive a formatted message from a subagent, answer with `reply`:
-
-```typescript
-intercom({ action: "reply", message: "Use the stable v2 API and keep the public error shape unchanged." })
-```
-
-Escalation meanings:
+Supervisor-side: answer formatted child escalations with `intercom` `reply`.
 
 | Type | Meaning | Supervisor response |
 | --- | --- | --- |
@@ -146,7 +65,7 @@ Escalation meanings:
 | `interview_request` | Child needs multiple structured answers | Reply with JSON using the requested ids |
 | `progress_update` | Child reports plan-changing progress | Read it; reply only if redirecting |
 
-For interview requests, reply with plain JSON or a fenced JSON block:
+Interview replies use plain JSON or a fenced JSON block. `info` questions are context only and need no response entries:
 
 ```json
 {
@@ -156,8 +75,6 @@ For interview requests, reply with plain JSON or a fenced JSON block:
   ]
 }
 ```
-
-`info` questions are context only and do not need response entries. Do not use supervisor contact for routine completion; child agents should return final results through `pi-subagents`.
 
 If a subagent status line advertises an intercom target, trust it only when that target appears in `intercom({ action: "list" })`. If absent, use normal subagent controls (`status`, `resume`, `nudge`, result artifacts); the child may be Claude Code-backed or already exited and have no child-side `contact_supervisor`. From a parent session, prefer `subagent({ action: "nudge", id, message })` for a non-blocking live child ping; use direct `intercom({ action: "ask", to, delivery: "steer", message })` when you need to wait for a listed child reply.
 

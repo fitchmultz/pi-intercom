@@ -20,7 +20,7 @@ Sometimes you're running multiple pi sessions — one researching, one executing
 
 Unlike pi-messenger (a shared chat room for multi-agent swarms), pi-intercom is for targeted 1:1 communication where you pick the recipient.
 
-Pi-intercom also integrates well with [pi-subagents](https://github.com/nicobailon/pi-subagents): delegated child agents get a child-only `contact_supervisor` tool when `pi-subagents` supplies bridge metadata. Use `reason: "need_decision"` for blocking clarification, `reason: "interview_request"` for multiple structured supervisor answers, and `reason: "progress_update"` for meaningful plan-changing updates. Normal sessions only see the regular `intercom` tool.
+Pi-intercom also integrates well with [pi-subagents](https://github.com/nicobailon/pi-subagents): delegated child agents get a child-only `contact_supervisor` tool when `pi-subagents` supplies bridge metadata. Use blocking `need_decision` or `interview_request` only when the ephemeral child cannot safely continue and must remain alive for the reply. Use `progress_update` only for a concise plan-changing update that may intentionally wait behind active supervisor work. Normal sessions only see the regular `intercom` tool.
 
 ## In One Minute
 
@@ -61,7 +61,7 @@ Coordinate with other local pi sessions on related codebases. Use `/skill:pi-int
 
 **Not when:** Unrelated codebases, trivial questions, or when you can proceed independently.
 
-**Principle:** Use `send` when no reply is needed, `ask` when blocked waiting for input, `delivery:"steer"` only for urgent course corrections, and passive delivery only for human-visible breadcrumbs the recipient model should not read now.
+**Principle:** Prefer non-blocking `send` with `delivery:"steer"` for live agent guidance, answers, corrections, and blockers. Use queue only when delay is intentional, and use blocking `ask` only when the sender must remain alive waiting for the answer.
 </pi-intercom>
 ```
 
@@ -97,11 +97,11 @@ intercom({ action: "list" })
 // →   ↳ self target unavailable; choose a peer from Other sessions; use pending/reply for inbound asks
 // → **Other sessions:**
 // → • research (6332faab) — ~/projects/api (claude-sonnet-4) [same cwd, thinking, state:busy, accepts_asks:false, pending_asks:1, last_intercom_activity:2m ago]
-// →   ↳ send accepted; default ask returns peer_idle; use queue for normal follow-up, steer only to redirect; passive discouraged
+// →   ↳ send accepted; steer for live guidance; ask only if sender must stay alive for a required reply (default returns peer_idle); queue only for intentional delay; passive discouraged
 
-// Ask a peer to start work and reply inline
-intercom({ action: "ask", to: "research", message: "Check if UserService.validate() handles null. Reply with what you find." })
-// → Reply from research: UserService.validate() handles null via the guard at line 42.
+// Send live guidance without blocking this long-lived session
+intercom({ action: "send", to: "research", delivery: "steer", message: "Check if UserService.validate() handles null. Send the finding back with steer." })
+// → Message sent to research. This session can end its turn or continue independent work.
 
 // Check connection status and the same live recipient guidance
 intercom({ action: "status" })
@@ -135,11 +135,11 @@ Found the issue — UserService.validate() doesn't check for null input.
 See auth.ts:142-156.
 ```
 
-The reply hint (enabled by default) points to `intercom({ action: "reply", ... })`, so recipients do not need raw sender or `replyTo` IDs. Idle recipients get a new turn immediately for `send` and `ask`; busy interactive recipients receive default messages once they go idle. Explicit `delivery:"queue"` uses Pi's native follow-up queue for stacked active-recipient messages; `queueMode:"replace"` stays intercom-staged for a short coalescing window and while active so older undelivered thread updates can be replaced. `delivery:"steer"` uses Pi's native steering queue. Attachment content is included in the agent-visible body, and messages are rendered inline and stored in Pi session history. Only `send` with passive delivery renders without waking the recipient model.
+The reply hint (enabled by default) points to `intercom({ action: "reply", ... })`, so recipients do not need raw sender or `replyTo` IDs. Prefer explicit `delivery:"steer"` for meaningful live coordination: it wakes an idle recipient or reaches a busy recipient at the next tool boundary. The recipient should incorporate relevant context and continue its active task unless the message explicitly replaces it. Use `delivery:"queue"` only when delay is intentional; `queueMode:"replace"` keeps only the latest undelivered thread update. Attachment content is included in the agent-visible body and stored in Pi session history. Only passive `send` renders without waking the recipient model.
 
 ## Workflow: Planner-Worker Coordination
 
-The most natural use of pi-intercom is splitting a task between two sessions — one holds the big picture, the other does the hands-on work. When the worker hits an ambiguity ("should I optimize for readability or performance here?"), they ask without losing context.
+The most natural use of pi-intercom is splitting a task between two sessions — one holds the big picture, the other does the hands-on work. When the worker hits an ambiguity, it steers the planner without losing context or blocking its long-lived session.
 
 ### Setup
 
@@ -159,81 +159,72 @@ intercom({ action: "list" })
 
 ### The Conversation
 
-Here's how a typical exchange looks. The planner delegates with `ask` when it wants to wake an idle worker and receive an acknowledgement. The worker also uses `ask` for anything that needs a response — questions, discoveries, completion reports. `ask` sends the message and blocks until the recipient replies, so the sender gets the answer as a tool result and continues in the same turn.
+Long-lived Pi sessions normally coordinate without blocking each other. The sender uses `send` plus steer and ends its turn or continues independent work. The recipient sees the message at its next tool boundary, incorporates relevant context, continues the active task, and sends any answer back with steer. A steer supplements the task unless it explicitly says to replace it.
 
-**Planner delegates a task and wakes the worker:**
+**Planner delegates work:**
 ```typescript
 intercom({
-  action: "ask",
+  action: "send",
   to: "worker",
-  message: "Task-3: Add retry logic to API client. Key files: src/api/client.ts, src/api/types.ts. Reply with ACK, then ask if anything's unclear."
+  delivery: "steer",
+  message: "Task-3: Add retry logic to API client. Key files: src/api/client.ts, src/api/types.ts."
 })
-// → Reply from worker: ACK — starting task-3.
 ```
 
-**Worker hits an ambiguity — asks and waits:**
+**Worker steers a live discovery without holding its process open:**
 ```typescript
 intercom({
-  action: "ask",
+  action: "send",
   to: "planner",
-  message: "Should retry apply to all endpoints or just idempotent ones? Also, max retry count and backoff strategy?"
+  delivery: "steer",
+  message: "Blocked: should retry apply only to idempotent endpoints? Send the decision back with steer."
 })
-// → Reply from planner: Only GET/PUT/DELETE — never POST. Max 3 retries, exponential backoff starting at 100ms.
-// Worker continues implementing with the answer, same turn, full context.
+// Worker ends its turn instead of polling or waiting.
 ```
 
-**Worker finds something unexpected — escalates and waits:**
+**Planner answers while preserving the worker's active task:**
 ```typescript
 intercom({
-  action: "ask",
-  to: "planner",
-  message: "Found: fetchWithTimeout swallows network errors. Fixing this changes the error shape. OK to proceed?"
+  action: "send",
+  to: "worker",
+  delivery: "steer",
+  message: "Apply retries only to GET/PUT/DELETE. Max 3, exponential backoff from 100ms. Continue the current task."
 })
-// → Reply from planner: Yes, surface the error types. The current behavior is a bug.
 ```
 
 **Worker reports completion:**
 ```typescript
 intercom({
-  action: "ask",
+  action: "send",
   to: "planner",
-  message: "Task-3 done. Added RetryPolicy type, applied to GET/PUT/DELETE, surfaced NetworkError, 4 tests passing."
+  delivery: "steer",
+  message: "Task-3 done. Added RetryPolicy, applied it to GET/PUT/DELETE, surfaced NetworkError, and passed 4 tests."
 })
-// → Reply from planner: Looks good. Move on to task-4.
 ```
 
 ### Communication Patterns
 
 | Pattern | Action | Why |
 |---------|--------|-----|
-| **Task Delegation** | Planner uses `ask` | Wakes the worker and confirms it received the task. |
-| **Clarification Request** | Worker uses `ask` | Worker needs the answer to proceed. Blocks until reply. |
-| **Discovery Escalation** | Worker uses `ask` | Worker needs approval before changing course. |
-| **Completion Report** | Worker uses `ask` | Planner might have follow-up instructions or the next task. |
+| **Task Delegation** | `send` + steer | Wakes an idle worker or reaches a busy worker at the next tool boundary without blocking the planner. |
+| **Guidance / Answer** | `send` + steer | Makes relevant context available during active work. |
+| **Clarification / Blocker** | `send` + steer | Long-lived peers can end their turn and wake when the answer arrives. |
+| **Intentional Deferral** | `send` + queue | The recipient should not incorporate the note until after active work. |
+| **Ephemeral Blocking Wait** | `ask` + steer | Keeps a short-lived process alive only when it cannot safely continue without the reply. |
 
-### Reply Hints
+### Blocking Ask Exception
 
-When `replyHint` is enabled (the default), incoming asks include the exact `intercom()` call to respond:
-
-```
-**From planner** (~/projects/api)
-
-To reply, use the intercom tool: intercom({ action: "reply", message: "..." })
-
-Only GET/PUT/DELETE — never POST. Max 3 retries with exponential backoff starting at 100ms.
-```
-
-This matters because the agent receiving the message doesn't need to reconstruct raw `to` and `replyTo` IDs — the hint is right there. Combined with idle-gated `triggerTurn` delivery, it enables real back-and-forth conversation without interrupting work in progress. If the reply happens later instead of in the triggered turn, `intercom({ action: "reply" })` falls back to the single unresolved inbound ask, and `intercom({ action: "pending" })` shows who is still waiting.
+Use `ask` only when the sender process must remain alive and cannot safely continue without the answer, such as an ephemeral dispatched subagent. Pass `delivery:"steer"` so the question reaches a busy recipient at its next tool boundary. The recipient answers with `intercom({ action: "reply", message: "..." })`; `pending` recovers unresolved asks when needed.
 
 ### `send` vs `ask`
 
-`send` is non-blocking — the tool returns after the broker either delivers to a live recipient or reports that replace-mode delivery is queued, and it does not return any later response. It wakes idle recipients by default; active recipients may see the message after the current tool call or when idle. Use `ask` with `delivery:"steer"` or `delivery:"queue"` for active-recipient coordination that needs a reply in the same workflow. `send` supports `delivery:"queue"` for active-recipient follow-up, `delivery:"steer"` for urgent one-way course correction, and passive delivery for human-visible breadcrumbs only; avoid passive delivery for agent-to-agent coordination. If you want an approval dialog before non-reply sends, set `confirmSend: true` in config. Replies that include `replyTo` still skip confirmation so reply-hint flows can continue without an extra approval step.
+`send` is the default for agent-to-agent coordination. Pair it with `delivery:"steer"` for guidance, answers, corrections, blockers, and other context that may affect active work. It wakes idle recipients or reaches busy recipients at the next tool boundary, then returns after broker acceptance. Use queue only when delay is intentional, and passive only for human-visible breadcrumbs. If you want approval before non-reply sends, set `confirmSend: true`.
 
-`ask` sends the message and waits up to `askTimeoutMs` (default 2 minutes). If the peer publishes `accepts_asks:false`, a default ask is still delivered but the tool returns promptly with `delivered:true`, `replied:false`, and `reason:"peer_idle"` instead of burning the full timeout. Explicit `delivery:"queue"` or `delivery:"steer"` asks keep waiting for a reply because the caller deliberately chose an active-recipient path. The peer can reply later as a normal intercom message.
+`ask` sends and waits up to `askTimeoutMs` (default 2 minutes). Reserve `ask` plus steer for a sender process that must remain alive and cannot safely continue without the answer. Long-lived peers should use `send` plus steer and end their turn instead. A default ask to a peer publishing `accepts_asks:false` returns promptly with `reason:"peer_idle"`; an explicit steer ask keeps waiting.
 
-`reply` is receiver-side sugar for replying to an inbound ask. In the turn triggered by an incoming intercom ask, `intercom({ action: "reply", message: "..." })` targets that exact sender and message automatically. If you reply later, it falls back to the single unresolved inbound ask. If multiple asks are pending, use `intercom({ action: "pending" })` to inspect them and then call `reply` with `to` to disambiguate.
+`reply` answers an inbound ask using its exact sender and message automatically. Otherwise, answer ordinary coordination with `send` plus steer. If multiple asks are pending, use `pending` and disambiguate with `to`.
 
-The planner typically uses `send` for new context or progress and `ask` for anything requiring a decision or acknowledgement. Use `delivery:"queue"` when an active peer should handle the note after current work, `delivery:"steer"` only when the current path likely needs correction, and passive delivery only when the note is for the human transcript. If you prefer manual approval for outgoing non-reply messages, turn on `confirmSend: true`.
+Inbound steers are supplemental coordination inside the active task. Incorporate relevant context and continue; replace the task only when the message explicitly instructs replacement.
 
 ## Workflow: Subagent-to-Supervisor Escalation
 
@@ -250,15 +241,15 @@ This workflow requires [`pi-subagents`](https://github.com/nicobailon/pi-subagen
 
 If any are missing, the session falls back to the regular `intercom` tool. A subagent status line may mention an intercom target before the child is actually registered with pi-intercom; treat `intercom({ action: "list" })` as the source of truth. If the advertised target is absent from `list`, use normal subagent controls (`status`, `resume`, `nudge`, result artifacts) instead of sending to that target; the child may be Claude Code-backed or already exited and have no child-side `contact_supervisor`.
 
-When both extensions are enabled, parent sessions can use `subagent({ action: "nudge", id: "<run-id>", message: "..." })` to send a non-blocking steered nudge to a live child. `subagent status` may also show the direct blocking `intercom({ action: "ask", to: "...", delivery: "steer", message: "..." })` path. `pi-intercom` remains the source of truth for connected sessions and only delivers to registered local peers.
+When both extensions are enabled, parent sessions can use `subagent({ action: "nudge", id: "<run-id>", message: "..." })` to send a non-blocking steered nudge to a live child. `subagent status` may also show the direct blocking `intercom({ action: "ask", to: "...", delivery: "steer", message: "..." })` path; use that exception only when the parent process must remain alive and cannot safely continue without the reply. `pi-intercom` remains the source of truth for connected sessions and only delivers to registered local peers.
 
 ### Three Reasons
 
 | Reason | Behavior | Use When |
 |--------|----------|----------|
-| `need_decision` | Sends an ask and blocks until the supervisor replies (`askTimeoutMs`, default 2 minutes) | The subagent is blocked, uncertain, needs approval, or faces a product/API/scope decision |
-| `interview_request` | Sends structured questions and blocks until the supervisor replies | The subagent needs multiple machine-readable answers from the supervisor in one exchange |
-| `progress_update` | Non-blocking update to the supervisor | Meaningful progress or unexpected discoveries that change the plan |
+| `need_decision` | Sends a steered ask and keeps the child alive until the supervisor replies (`askTimeoutMs`, default 2 minutes) | The ephemeral child cannot safely continue without one decision, approval, or product/API/scope clarification |
+| `interview_request` | Sends a steered structured ask and keeps the child alive until the supervisor replies | The ephemeral child cannot safely continue until it receives multiple structured answers |
+| `progress_update` | Non-blocking, deferred/coalesced update to the supervisor | A concise plan-changing update may intentionally wait behind active supervisor work |
 
 Do not use `contact_supervisor` for routine completion handoffs. Return the final subagent result normally through `pi-subagents`.
 
@@ -342,7 +333,7 @@ The supervisor can reply with plain JSON or a fenced `json` block. If the reply 
 | `message` | string | Message text (for send/ask/reply) |
 | `attachments` | array | Optional `file`, `snippet`, or `context` attachments |
 | `replyTo` | string | Optional message ID for threading or replying to an `ask` |
-| `delivery` | string | Optional: `"queue"` waits behind active work, `"steer"` injects after the current tool call, `"passive"` does not wake the recipient model (`send` only). |
+| `delivery` | string | Optional: `"steer"` is preferred for live coordination and injects after the current tool call, `"queue"` intentionally waits behind active work, and `"passive"` does not wake the recipient model (`send` only). |
 | `queueMode` | string | Optional with queued delivery: `"stack"` keeps all messages, `"replace"` keeps only the latest undelivered message for the same `threadId` after a short coalescing window. |
 | `threadId` | string | Required for `queueMode:"replace"`; stable topic key for replacement. |
 | `passive` | boolean | Legacy `send`-only alias for `delivery:"passive"`. Discouraged for agent-to-agent messages. |
@@ -357,19 +348,19 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 | `message` | string | The decision request, optional interview note, or progress update |
 | `interview` | object | Required for `interview_request`: `{ title?, description?, questions: [...] }` |
 
-**`need_decision`** — Sends a formatted ask to the supervisor and blocks until it replies (`askTimeoutMs`, default 2 minutes). The reply comes back as the tool result. Includes run metadata in the message so the supervisor knows which subagent is asking.
+**`need_decision`** — Use only when the ephemeral child cannot safely continue without one decision, approval, or product/API/scope clarification. It sends a formatted steered ask to the supervisor and keeps the child alive until the reply arrives (`askTimeoutMs`, default 2 minutes). The reply comes back as the tool result. Includes run metadata in the message so the supervisor knows which subagent is asking.
 
-**`interview_request`** — Sends a formatted, agent-readable interview to the supervisor and blocks until it replies. Questions use a local pi-interview-like shape: `{ id, type, question, options?, context? }` where `type` is `single`, `multi`, `text`, `image`, or `info`. `info` questions are context-only and do not need responses. The supervisor reply should be JSON with `{ "responses": [{ "id": "...", "value": ... }] }`. Parsed JSON replies are returned in `details.structuredReply`.
+**`interview_request`** — Use only when the ephemeral child cannot safely continue until it receives multiple structured answers. It sends a formatted, steered agent-readable interview to the supervisor and keeps the child alive until the reply arrives. Questions use a local pi-interview-like shape: `{ id, type, question, options?, context? }` where `type` is `single`, `multi`, `text`, `image`, or `info`. `info` questions are context-only and do not need responses. The supervisor reply should be JSON with `{ "responses": [{ "id": "...", "value": ... }] }`. Parsed JSON replies are returned in `details.structuredReply`.
 
-**`progress_update`** — Sends a non-blocking update to the supervisor. Returns immediately after delivery. Use only for meaningful progress or unexpected discoveries that change the plan.
+**`progress_update`** — Sends a non-blocking update through intentionally deferred, replace-mode delivery. Returns immediately after broker acceptance. Use only for a concise plan-changing update that may wait behind active supervisor work.
 
 ### intercom actions
 
 **`list`** — Returns the current session plus other active intercom-connected sessions with name, safe target, working directory, model, live status, and peer health tags: `state` (`idle`, `busy`, or `unknown`), `accepts_asks`, `pending_asks`, `last_intercom_activity`, and `last_seen`. Peer rows include live delivery guidance for `ask`, `send`, `queue`, `steer`, and the discouraged passive path; the self row says self-target delivery is unavailable and points to peer targets / `pending` / `reply`. Status is derived automatically from Pi lifecycle events: `idle`, `thinking`, or `tool:<name>`. If multiple sessions have the same name, use the displayed target exactly as shown, for example `to: "ca7bfec2"`. The target may be longer than eight characters when needed to avoid collisions.
 
-**`send`** — Sends a non-blocking message to the specified session. It wakes idle recipients by default and returns broker acceptance, not a later response. Omit `delivery` for the default safe path: active interactive recipients are idle-gated before wake. Use `delivery:"queue"` to hand the message to Pi's native follow-up queue, `delivery:"steer"` only to course-correct active work, and `delivery:"passive"`/`passive:true` only for human-visible breadcrumbs. `queueMode:"replace"` with a `threadId` replaces older undelivered intercom-staged messages for that thread after a short coalescing window; once a message is handed to Pi's native queue it cannot be keyed-replaced. Set `confirmSend: true` in config if you want a confirmation dialog for non-reply sends. Replies that include `replyTo` skip confirmation.
+**`send`** — Sends a non-blocking message to the specified session and returns broker acceptance, not a later response. Prefer `delivery:"steer"` for guidance, answers, corrections, blockers, or other live coordination: it wakes idle recipients or reaches busy recipients at the next tool boundary. Use `delivery:"queue"` only when delay is intentional, and `delivery:"passive"`/`passive:true` only for human-visible breadcrumbs. `queueMode:"replace"` with a `threadId` replaces older undelivered intercom-staged messages for that thread after a short coalescing window; once a message is handed to Pi's native queue it cannot be keyed-replaced. Set `confirmSend: true` in config if you want a confirmation dialog for non-reply sends. Replies that include `replyTo` skip confirmation.
 
-**`ask`** — Sends a message and waits for the recipient to reply (`askTimeoutMs`, default 2 minutes). The reply is returned as the tool result. If the target publishes `accepts_asks:false`, a default ask is delivered and returns promptly with `replied:false` and `reason:"peer_idle"`; explicit `delivery:"queue"` or `delivery:"steer"` asks still wait for a reply. No confirmation dialog. Only one pending waiting `ask` is allowed per session at a time. Use this when the agent needs the answer to continue working. Passive delivery is rejected.
+**`ask`** — Sends a message and waits for the recipient to reply (`askTimeoutMs`, default 2 minutes). Reserve it for a sender process that must remain alive and cannot safely continue without the answer; use `delivery:"steer"` so a busy recipient sees it at the next tool boundary. If the target publishes `accepts_asks:false`, a default blocking ask returns promptly with `reason:"peer_idle"`, while an explicit steer ask still waits. Only one pending waiting ask is allowed per session. Passive delivery is rejected.
 
 **`reply`** — Replies to the current intercom-triggered message if there is one. Otherwise it falls back to the single unresolved inbound ask. If multiple asks are pending, pass `to` or inspect them with `pending` first. Under the hood this is still a normal `send` with the exact `replyTo` value.
 

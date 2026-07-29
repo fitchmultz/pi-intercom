@@ -452,10 +452,10 @@ function formatIntercomAge(timestamp: number | undefined, now: number): string {
 function sessionDeliveryGuidance(session: SessionInfo, isSelf: boolean): string {
   if (isSelf) return "self target unavailable; choose a peer from Other sessions; use pending/reply for inbound asks";
   const state = sessionBusyState(session);
-  if (state === "idle") return "ask ok; send wakes; queue for follow-up; steer urgent only; passive discouraged";
-  if (session.acceptsAsks === false) return "send accepted; default ask returns peer_idle; use queue for normal follow-up, steer only to redirect; passive discouraged";
-  if (state === "busy") return "send accepted; default ask may wait; use queue for normal follow-up, steer only to redirect; passive discouraged";
-  return "state unknown; list target is valid; use ask for needed replies, queue for active follow-up, steer urgent only; passive discouraged";
+  if (state === "idle") return "send wakes; steer for live guidance; ask only if sender must stay alive for a required reply; queue only for intentional delay; passive discouraged";
+  if (session.acceptsAsks === false) return "send accepted; steer for live guidance; ask only if sender must stay alive for a required reply (default returns peer_idle); queue only for intentional delay; passive discouraged";
+  if (state === "busy") return "send accepted; steer for live guidance at next tool boundary; ask only if sender must stay alive for a required reply; queue only for intentional delay; passive discouraged";
+  return "state unknown; target is valid; prefer steer for live guidance; ask only if sender must stay alive for a required reply; queue only for intentional delay; passive discouraged";
 }
 function formatSessionListRow(session: SessionInfo, currentCwd: string, isSelf: boolean, duplicates = new Set<string>(), allSessions: SessionInfo[] = [session], now = Date.now()): string {
   const name = session.name || "Unnamed session";
@@ -969,6 +969,12 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         return;
       }
       if (!isRecipientIdle(activeContext)) {
+        if (activeContext.hasUI && isBlockingSubagentSupervisorMessage(entry)) {
+          await requestSubagentDetachForBlockingSupervisorMessage(entry);
+          if (!getLiveContext(liveContext, messageGeneration)) {
+            return;
+          }
+        }
         if (delivery === "steer") {
           sendIncomingMessage(entry, "steer", messageGeneration);
           return;
@@ -1002,10 +1008,6 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
               // Best-effort reply; keep the busy non-interactive session running either way.
             }
           }
-          return;
-        }
-        await requestSubagentDetachForBlockingSupervisorMessage(entry);
-        if (!getLiveContext(liveContext, messageGeneration)) {
           return;
         }
         queueIdleMessage(entry, "auto");
@@ -1446,17 +1448,17 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     pi.registerTool({
       name: "contact_supervisor",
       label: "Contact Supervisor",
-      description: "Subagent-only tool for contacting the supervisor agent that delegated this task. Use need_decision when blocked, uncertain, needing approval, or facing a product/API/scope decision before continuing; this waits for the supervisor's reply. Use interview_request when multiple structured questions need supervisor answers; this also waits for a reply. Use progress_update only for meaningful progress or unexpected discoveries that change the plan; this does not wait for a reply. Do not use for routine completion handoffs.",
-      promptSnippet: "Subagent-only: contact the supervisor for decisions, structured interviews, or meaningful plan-changing updates. Do not use for routine completion handoffs.",
+      description: "Subagent-only tool for contacting the supervisor agent that delegated this task. Use need_decision only when this child cannot safely continue without a decision, approval, or product/API/scope clarification; this steers the supervisor at its next tool boundary and keeps the child alive for the reply. Use interview_request only when multiple structured answers are all required before safe progress; this also steers and waits. Use progress_update only for a concise plan-changing update that may intentionally wait behind active supervisor work; this uses deferred delivery and does not wait. Do not use for routine completion handoffs.",
+      promptSnippet: "Subagent-only: steer the supervisor for blocking decisions or structured interviews; intentionally defer meaningful plan-changing progress updates. Do not use for routine completion handoffs.",
       promptGuidelines: [
-        "Use contact_supervisor with reason='need_decision' when a subagent is blocked, uncertain, needs approval, or faces a product/API/scope decision before continuing.",
-        "Use contact_supervisor with reason='interview_request' when the child needs multiple structured answers from the supervisor in one blocking exchange.",
-        "Use contact_supervisor with reason='progress_update' only for meaningful progress or unexpected discoveries that change the plan.",
+        "Use contact_supervisor with reason='need_decision' when a subagent cannot safely continue without a decision, approval, or product/API/scope clarification; it steers the supervisor and waits for the reply.",
+        "Use contact_supervisor with reason='interview_request' only when the child cannot safely continue until it receives multiple structured answers in one blocking steered exchange.",
+        "Use contact_supervisor with reason='progress_update' only for a concise plan-changing update that may intentionally wait behind active supervisor work; delivery is deferred and coalesced.",
         "Do not use contact_supervisor for routine completion handoffs; return the final subagent result normally.",
       ],
       parameters: Type.Object({
         reason: StringEnum(["need_decision", "progress_update", "interview_request"] as const, {
-          description: "Contact reason: 'need_decision' waits for a reply; 'interview_request' sends structured questions and waits for a reply; 'progress_update' sends a non-blocking update",
+          description: "Contact reason: 'need_decision' and 'interview_request' steer the supervisor and wait for a reply; 'progress_update' intentionally defers a non-blocking update",
         }),
         message: Type.Optional(Type.String({
           description: "Decision request, optional interview note, or meaningful progress update for the supervisor",
@@ -1602,7 +1604,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           ? formatChildOrchestratorMessage("interview", metadata, formatSupervisorInterviewRequest(supervisorInterview!, typeof params.message === "string" ? params.message : undefined))
           : formatChildOrchestratorMessage("ask", metadata, params.message as string);
         try {
-          const replyMessage = await sendAskTransaction(connectedClient, sendTo, questionId, { text: requestText }, signal, (sendResult) => {
+          const replyMessage = await sendAskTransaction(connectedClient, sendTo, questionId, { text: requestText, delivery: "steer" }, signal, (sendResult) => {
             pi.appendEntry("intercom_sent", {
               to: metadata.orchestratorTarget,
               message: {
@@ -1692,16 +1694,23 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     label: "Intercom",
     description: `Send a message to another pi session running on this machine.
 Use this to communicate findings, request help, or coordinate work with other sessions.
+Prefer non-blocking send with delivery:"steer" for guidance, answers, corrections, or blockers that may affect active work. Use queue only when delay is intentional; use ask only when this process must remain alive waiting for the reply.
 
 Usage:
   intercom({ action: "list" })                    → List active sessions
-  intercom({ action: "send", to: "session-name", message: "..." })  → Send message
-  intercom({ action: "ask", to: "session-name", message: "..." })   → Ask and wait for reply
+  intercom({ action: "send", to: "session-name", delivery: "steer", message: "..." })  → Send live coordination
+  intercom({ action: "ask", to: "session-name", delivery: "steer", message: "..." })   → Blocking wait only when sender must stay alive
   intercom({ action: "reply", message: "..." })                      → Reply to the active/single pending ask
   intercom({ action: "pending" })                                      → List unresolved inbound asks
   intercom({ action: "status" })                  → Show connection status`,
     promptSnippet:
-      "Use to coordinate with other local pi sessions: list peers, send updates, ask for help, or check intercom connectivity.",
+      "Coordinate with local Pi sessions. Prefer non-blocking send with delivery steer for live agent guidance; queue only for intentional delay and ask only for a required blocking reply.",
+    promptGuidelines: [
+      "Prefer action='send' with delivery='steer' for agent-to-agent guidance, answers, corrections, blockers, or other context that may affect active work.",
+      "Use delivery='queue' only when delay is intentional, and passive only when the recipient model should not see the message now.",
+      "Treat inbound steered messages as supplemental coordination within the active task: incorporate relevant context and continue; replace the task only when the message explicitly says so.",
+      "Use action='reply' for an active inbound ask. Otherwise respond with send plus steer; use blocking ask only when this process must stay alive and cannot safely continue without the answer.",
+    ],
 
     parameters: Type.Object({
       action: StringEnum(["list", "send", "ask", "reply", "pending", "status"] as const, {
@@ -1723,7 +1732,7 @@ Usage:
         description: "Message ID to reply to (for threading or responding to an 'ask')",
       })),
       delivery: Type.Optional(StringEnum(["queue", "steer", "passive"] as const, {
-        description: "Optional delivery mode: 'queue' waits behind active work, 'steer' injects after the current tool call, 'passive' does not wake the recipient model.",
+        description: "Delivery mode: 'steer' is preferred for live agent coordination and injects after the current tool call; 'queue' intentionally waits behind active work; 'passive' does not wake the recipient model.",
       })),
       queueMode: Type.Optional(StringEnum(["stack", "replace"] as const, {
         description: "For delivery='queue': 'stack' keeps all messages; 'replace' keeps only the latest undelivered message for the same threadId.",
@@ -1761,7 +1770,7 @@ Usage:
       }
       if (delivery === "passive" && action !== "send") {
         return {
-          content: [{ type: "text", text: "delivery='passive' is only valid for action='send'. Passive delivery is for human-visible breadcrumbs and is discouraged for agent-to-agent coordination; use ask without passive when you need a reply." }],
+          content: [{ type: "text", text: "delivery='passive' is only valid for action='send'. Passive delivery is for human-visible breadcrumbs and is discouraged for agent-to-agent coordination; use send with delivery='steer' for normal live coordination, and ask with delivery='steer' only when the sender must stay alive and cannot safely continue without the reply." }],
           isError: true,
           details: { error: true },
         };
@@ -1798,7 +1807,7 @@ Usage:
       const cleanedThreadId = typeof threadId === "string" ? threadId.trim() : undefined;
       if (queueMode !== undefined && deliveryMode !== "queue") {
         return {
-          content: [{ type: "text", text: "'queueMode' is only valid with delivery='queue'. Use delivery='queue' for normal active-recipient follow-up; use delivery='steer' only for urgent redirection; avoid passive for agent-to-agent coordination." }],
+          content: [{ type: "text", text: "'queueMode' is only valid with delivery='queue'. Use queue only for intentionally deferred work; otherwise omit queueMode and prefer delivery='steer' for live agent coordination. Avoid passive for agent-to-agent coordination." }],
           isError: true,
           details: failureDetails("invalid_queue_arguments", [{ action: "send", guidance: "Set delivery='queue', or omit queueMode and threadId." }], { error: true }),
         };
@@ -1887,8 +1896,8 @@ Usage:
                 : deliveryMode === "steer"
                   ? " (steers active recipient after the current tool call)"
                   : deliveryMode === "queue"
-                    ? " (queued for active recipient; use `ask` when you need a reply)"
-                    : " (accepted; wakes idle recipients; active recipients may see it after the current tool call or when idle; use ask+delivery:'steer' when you need a live reply)";
+                    ? " (intentionally deferred behind active recipient work)"
+                    : " (accepted; wakes idle recipients; active recipients may see it after the current tool call or when idle; use delivery:'steer' for live coordination)";
             return {
               content: [{ type: "text", text: result.queued ? `Message queued for ${to} (${result.reason ?? "queued"})` : `Message sent to ${to}${replyModeHint}` }],
               isError: false,
@@ -1979,7 +1988,7 @@ Usage:
               return {
                 content: [{ type: "text", text: `Delivered ask to ${to}; peer reports it is not accepting asks right now (peer_idle).` }],
                 isError: false,
-                details: { messageId: sendResult.id, delivered: true, replied: false, reason: "peer_idle", reasonCode: "recipient_not_accepting_asks", nextActions: [{ action: "send", guidance: "Use queue for normal follow-up or steer only for urgent redirection." }] },
+                details: { messageId: sendResult.id, delivered: true, replied: false, reason: "peer_idle", reasonCode: "recipient_not_accepting_asks", nextActions: [{ action: "send", guidance: "Use send with delivery='steer' for non-blocking live coordination; queue only when delay is intentional." }] },
               };
             }
             replyMessage = await sendAskTransaction(connectedClient, sendTo, questionId, sendOptions, _signal, recordSent);

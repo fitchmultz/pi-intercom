@@ -41,29 +41,30 @@ Coordinate named Pi sessions on the same machine with the least context loss and
 
 | Action | Use for | Effect |
 | --- | --- | --- |
-| `send` | Context drops, progress, non-blocking notices | Wakes idle recipients and returns after broker acceptance; use `delivery:"queue"` for active-recipient follow-up, `delivery:"steer"` only for urgent course correction, and passive delivery only for human-visible breadcrumbs |
-| `ask` | Decisions, clarifications, ACKs needed now | Wakes/queues the recipient and waits up to `askTimeoutMs` (default 2 minutes); default asks to peers reporting `accepts_asks:false` return `delivered:true`, `replied:false`, `reason:"peer_idle"`, while explicit `delivery:"queue"`/`"steer"` asks still wait for a reply; not passive |
+| `send` | Guidance, answers, corrections, blockers, context, or other non-blocking coordination | Prefer `delivery:"steer"`: it wakes idle recipients or reaches busy recipients at the next tool boundary, then returns after broker acceptance. Use queue only when delay is intentional and passive only for human-visible breadcrumbs. |
+| `ask` | A required answer when this process must remain alive waiting for it | Use `delivery:"steer"`; waits up to `askTimeoutMs` (default 2 minutes). Default asks to peers reporting `accepts_asks:false` return `delivered:true`, `replied:false`, `reason:"peer_idle"`, while explicit steer asks keep waiting; not passive. |
 | `reply` | Answering an inbound ask | Uses the active ask, or the single pending ask |
 | `pending` | Multiple or delayed inbound asks | Lists unresolved asks so you can disambiguate |
 | `status` | Troubleshooting connection state | Shows connection, active session count, and the same live recipient capability/guidance rows as `list` |
 
 5. Write compact messages with objective, scope, relevant files, stop boundary, and expected reply. Attachments only when the recipient needs the extra context.
-6. For long work, `send` checkpoints the recipient agent should see; `ask` when a reply is required. Trust `list`/`status` guidance: active recipient → `delivery:"queue"` for normal follow-up, `delivery:"steer"` only when its current path is likely wrong, passive only for human-transcript breadcrumbs. Optional `delivery:"queue", queueMode:"replace", threadId:"<non-empty>"` keeps only the latest undelivered update for that thread.
-7. After tool results, continue from the reply or error. Do not assume delivery after a failed result.
+6. For live agent-to-agent coordination, use non-blocking `send` with `delivery:"steer"`, then end the turn or continue independent work. Use queue only when delay is intentional; optional `delivery:"queue", queueMode:"replace", threadId:"<non-empty>"` keeps only the latest undelivered update for that thread.
+7. Treat inbound steers as coordination within the active task: incorporate relevant context and continue. Replace the task only when the message explicitly says so. Reply to an active ask with `reply`; otherwise respond with `send` plus steer.
+8. Use blocking `ask` only when this process must stay alive and cannot safely continue without the answer. After any tool result, handle the reply or error; do not assume delivery after failure.
 
 ## Supervisor escalations from pi-subagents
 
 When present, child sessions get a child-only `contact_supervisor` tool; normal sessions use `intercom`. Do not assume `contact_supervisor` exists unless the tool is listed.
 
-Child-side reasons only: `need_decision`, `interview_request`, or meaningful `progress_update`.
+Child-side reasons only: blocking `need_decision` or `interview_request` when the ephemeral child cannot safely continue and must remain alive for the reply, or an intentionally deferred `progress_update` for a concise plan-changing update.
 
 Supervisor-side: answer formatted child escalations with `intercom` `reply`.
 
 | Type | Meaning | Supervisor response |
 | --- | --- | --- |
-| `need_decision` | Child is blocked or needs approval | Reply promptly with a clear decision |
-| `interview_request` | Child needs multiple structured answers | Reply with JSON using the requested ids |
-| `progress_update` | Child reports plan-changing progress | Read it; reply only if redirecting |
+| `need_decision` | Child cannot safely continue without one decision or approval | Reply promptly with a clear decision |
+| `interview_request` | Child cannot safely continue without multiple structured answers | Reply with JSON using the requested ids |
+| `progress_update` | Child intentionally deferred a concise plan-changing update | Read it; reply only if redirecting |
 
 Interview replies use plain JSON or a fenced JSON block. `info` questions are context only and need no response entries:
 
@@ -76,7 +77,7 @@ Interview replies use plain JSON or a fenced JSON block. `info` questions are co
 }
 ```
 
-If a subagent status line advertises an intercom target, trust it only when that target appears in `intercom({ action: "list" })`. If absent, use normal subagent controls (`status`, `resume`, `nudge`, result artifacts); the child may be Claude Code-backed or already exited and have no child-side `contact_supervisor`. From a parent session, prefer `subagent({ action: "nudge", id, message })` for a non-blocking live child ping; use direct `intercom({ action: "ask", to, delivery: "steer", message })` when you need to wait for a listed child reply.
+If a subagent status line advertises an intercom target, trust it only when that target appears in `intercom({ action: "list" })`. If absent, use normal subagent controls (`status`, `resume`, `nudge`, result artifacts); the child may be Claude Code-backed or already exited and have no child-side `contact_supervisor`. From a parent session, prefer `subagent({ action: "nudge", id, message })` for non-blocking live child coordination; it supplements the active child task unless it explicitly replaces it. Use direct `intercom({ action: "ask", to, delivery: "steer", message })` only when the parent process must remain alive and cannot safely continue without a listed child reply.
 
 ## Optional visible peer sessions
 
@@ -101,6 +102,6 @@ Read `references/peer-sessions.md` before starting a new visible peer session. S
 A good intercom-assisted turn ends with:
 
 - Target came from `list` or from the active inbound ask.
-- Action matched intent: `send` for non-blocking/wake, `ask` for blocking, `reply` for inbound, `delivery:"queue"` for normal active-recipient follow-up, `delivery:"steer"` for urgent course correction, and passive delivery only when deliberately not waking the model.
+- Action matched intent: `send` plus `delivery:"steer"` for live coordination, `ask` plus steer only for a required blocking reply, `reply` for an inbound ask, queue only for intentional delay, and passive only when deliberately not waking the model.
 - Delivery result or failure was handled.
 - Any spawned peer was smoke-tested and either still needed or cleaned up.

@@ -12,6 +12,7 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 - Added `queueMode:"replace"` with `threadId` to replace older undelivered intercom-staged messages in the same thread before handing them to Pi.
 
 ### Changed
+- Cut model-facing coordination guidance over to prefer explicit steer for live agent guidance, answers, corrections, and blockers; queue is now documented only for intentional delay, and blocking asks are reserved for processes that must remain alive for the reply. Child supervisor decisions and interviews now use explicit steer while waiting.
 - Raised the minimum `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` compatibility to 0.80.10. Compose now relies on Pi's complete terminal input framing, and the session picker uses the native `SelectList` navigation, scrolling, and truncation behavior.
 - `send` now wakes idle recipient agents by default and surfaces clearer guidance for active-recipient delivery; passive delivery is explicit via `delivery:"passive"` or legacy `passive:true` and discouraged for agent-to-agent coordination.
 - Session registration no longer carries the unused `pid`, `startedAt`, or `lastActivity` fields. Health reporting continues through `lastSeen` and `lastIntercomActivity`.
@@ -21,6 +22,7 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 - Removed the intercom `config.json` `enabled` setting. Use `pi config` to enable or disable the package; existing `"enabled": false` values are ignored.
 
 ### Fixed
+- Preserve foreground subagent detachment before delivering steered blocking supervisor decisions and interviews, preventing the parent tool call and waiting child from deadlocking each other.
 - Busy non-interactive recipients now receive default non-reply sends after the current tool call, and queued replace-mode sends coalesce to the latest visible message instead of being dropped or delivered too late.
 - Stale queued subagent `progress_update` messages are now dropped instead of waking the supervisor after the foreground run already completed.
 - Presence now becomes idle on Pi's final `agent_settled` event, so retries, compaction retries, and queued continuations no longer advertise a session as idle early.

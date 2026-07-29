@@ -49,7 +49,7 @@ After the peer starts:
 
 ```typescript
 intercom({ action: "list" })
-intercom({ action: "ask", to: "worker", message: "Smoke test: reply exactly OK" })
+intercom({ action: "send", to: "worker", delivery: "steer", message: "Smoke test: send exactly OK back to this session with delivery steer." })
 ```
 
 Expected reply:

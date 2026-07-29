@@ -216,6 +216,9 @@ interface RenderTheme {
 
 interface CapturedTool {
   name: string;
+  description?: string;
+  promptSnippet?: string;
+  promptGuidelines?: string[];
   parameters?: unknown;
   execute: (toolCallId: string, params: Record<string, unknown>, signal: AbortSignal, onUpdate: unknown, ctx: unknown) => Promise<CapturedToolResult>;
   renderCall?: (args: Record<string, unknown>, theme: RenderTheme, context: Record<string, unknown>) => RenderedComponent;
@@ -568,7 +571,8 @@ test("intercom list and status show recipient capability and delivery guidance",
     assert.match(listText, /accepts_asks:false/);
     assert.match(listText, /pending_asks:2/);
     assert.match(listText, /last_intercom_activity:1m ago/);
-    assert.match(listText, /default ask returns peer_idle/);
+    assert.match(listText, /ask only if sender must stay alive for a required reply/);
+    assert.match(listText, /default returns peer_idle/);
     assert.match(listText, /passive discouraged/);
 
     const statusResult = await intercomTool.execute("tool-capability-status", {
@@ -581,7 +585,8 @@ test("intercom list and status show recipient capability and delivery guidance",
     assert.match(statusText, /Other sessions/);
     assert.match(statusText, /self target unavailable/);
     assert.match(statusText, /busy-peer/);
-    assert.match(statusText, /queue for normal follow-up/);
+    assert.match(statusText, /steer for live guidance/);
+    assert.match(statusText, /queue only for intentional delay/);
   } finally {
     await busyPeer.disconnect().catch(() => undefined);
     await harness.emitLifecycle("session_shutdown");
@@ -1887,7 +1892,10 @@ test("intercom tool validates passive and replace delivery options", { concurren
       delivery: "passive",
     }, new AbortController().signal, undefined, harness.ctx);
     assert.equal(passiveAsk.isError, true);
-    assert.match(passiveAsk.content[0]?.text ?? "", /delivery='passive' is only valid/);
+    const passiveAskText = passiveAsk.content[0]?.text ?? "";
+    assert.match(passiveAskText, /delivery='passive' is only valid/);
+    assert.match(passiveAskText, /use send with delivery='steer' for normal live coordination/);
+    assert.match(passiveAskText, /ask with delivery='steer' only when the sender must stay alive and cannot safely continue without the reply/);
 
     const replaceWithoutThread = await intercomTool.execute("delivery-replace-no-thread", {
       action: "send",
@@ -2041,6 +2049,73 @@ test("busy interactive sessions request subagent detach before idle-gating super
     assert.equal(harness.sentMessages[0]?.options?.triggerTurn, true);
     assert.match(harness.sentMessages[0]?.message.content ?? "", /Subagent needs a supervisor decision/);
     assert.match(harness.sentMessages[0]?.message.content ?? "", /please reply with approve/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("steered supervisor decisions and interviews detach the foreground child before reaching the busy parent", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  const detachRequests: string[] = [];
+  const messagesSentBeforeDetach: number[] = [];
+  const harness = createExtensionHarness("interactive-supervisor-steer", {
+    hasUI: true,
+    isIdle: () => false,
+  });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    harness.pi.events.on("pi-intercom:detach-request", (payload: unknown) => {
+      const requestId = payload && typeof payload === "object" ? (payload as { requestId?: unknown }).requestId : undefined;
+      if (typeof requestId !== "string") return;
+      detachRequests.push(requestId);
+      messagesSentBeforeDetach.push(harness.sentMessages.length);
+      harness.pi.events.emit("pi-intercom:detach-response", { requestId, accepted: true });
+    });
+    await harness.emitLifecycle("session_start");
+
+    const target = await waitForSessionByName(planner, "interactive-supervisor-steer");
+    const requests = [
+      {
+        messageId: "supervisor-steered-decision",
+        heading: "Subagent needs a supervisor decision.",
+        question: "Should I preserve the current API shape?",
+      },
+      {
+        messageId: "supervisor-steered-interview",
+        heading: "Subagent requests a structured supervisor interview.",
+        question: "Which API and rollout policy should I use?",
+      },
+    ];
+    for (const [index, request] of requests.entries()) {
+      const delivered = await planner.send(target.id, {
+        messageId: request.messageId,
+        text: [
+          request.heading,
+          "Run: run-steer",
+          "Agent: worker",
+          "Child index: 0",
+          "Child intercom target: subagent-worker-run-steer-1",
+          "",
+          request.question,
+        ].join("\n"),
+        expectsReply: true,
+        delivery: "steer",
+      });
+      assert.equal(delivered.delivered, true);
+      await waitForSentMessages(harness, index + 1);
+    }
+
+    assert.equal(detachRequests.length, 2);
+    assert.deepEqual(messagesSentBeforeDetach, [0, 1]);
+    assert.equal(harness.sentMessages.length, 2);
+    assert.equal(harness.sentMessages[0]?.message.customType, "intercom_message");
+    assert.equal(harness.sentMessages[0]?.options?.deliverAs, "steer");
+    assert.equal(harness.sentMessages[1]?.options?.deliverAs, "steer");
+    assert.match(harness.sentMessages[0]?.message.content ?? "", /Subagent needs a supervisor decision/);
+    assert.match(harness.sentMessages[1]?.message.content ?? "", /structured supervisor interview/);
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await cleanup();
@@ -2223,6 +2298,24 @@ test("busy non-interactive sessions auto-reply to top-level asks without abortin
   }
 });
 
+test("intercom tool advertises the steer-first coordination cutover", async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+
+  await withChildOrchestratorEnv({}, () => {
+    const harness = createExtensionHarness();
+    piIntercomExtension(harness.pi as never);
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const guidance = [intercomTool.description, intercomTool.promptSnippet, ...(intercomTool.promptGuidelines ?? [])].join("\n");
+
+    assert.match(guidance, /Prefer non-blocking send with delivery:?\"?steer/i);
+    assert.match(guidance, /queue only when delay is intentional/i);
+    assert.match(guidance, /supplemental coordination within the active task/i);
+    assert.match(guidance, /replace the task only when the message explicitly says so/i);
+    assert.match(guidance, /blocking ask only when this process must stay alive/i);
+    assert.doesNotMatch(guidance, /steer (?:is )?only for urgent/i);
+  });
+});
+
 test("supervisor tool registers only when child metadata is present", async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
 
@@ -2245,6 +2338,10 @@ test("supervisor tool registers only when child metadata is present", async () =
     const supervisorTool = harness.tools.find((tool) => tool.name === "contact_supervisor");
     assert.match(JSON.stringify(supervisorTool?.parameters), /interview_request/);
     assert.match(JSON.stringify(supervisorTool?.parameters), /questions/);
+    const guidance = [supervisorTool?.description, supervisorTool?.promptSnippet, ...(supervisorTool?.promptGuidelines ?? [])].join("\n");
+    assert.match(guidance, /cannot safely continue/i);
+    assert.match(guidance, /interview_request.*multiple structured answers/i);
+    assert.match(guidance, /progress_update.*deferred and coalesced/is);
   });
 });
 
@@ -2293,6 +2390,7 @@ test("child supervisor tool resolves target and includes run metadata", { concur
       const askResultPromise = supervisorTool.execute("ask-1", { reason: "need_decision", message: "Which API should I use?" }, new AbortController().signal, undefined, harness.ctx);
       const [askFrom, askMessage] = await askReceived;
       assert.equal(askMessage.expectsReply, true);
+      assert.equal(askMessage.delivery, "steer");
       assert.match(askMessage.content.text, /Subagent needs a supervisor decision/);
       assert.match(askMessage.content.text, /Run: 78f659a3/);
       assert.match(askMessage.content.text, /Agent: worker/);
@@ -2335,6 +2433,7 @@ test("child supervisor tool resolves target and includes run metadata", { concur
       }, new AbortController().signal, undefined, harness.ctx);
       const [interviewFrom, interviewMessage] = await interviewReceived;
       assert.equal(interviewMessage.expectsReply, true);
+      assert.equal(interviewMessage.delivery, "steer");
       assert.match(interviewMessage.content.text, /Subagent requests a structured supervisor interview/);
       assert.match(interviewMessage.content.text, /Interview: API migration choices/);
       assert.match(interviewMessage.content.text, /\[context\] \(info\) Migration context/);

@@ -24,7 +24,7 @@ Pi-intercom also integrates well with [pi-subagents](https://github.com/nicobail
 
 ## In One Minute
 
-Each pi session that has `pi-intercom` loaded connects to a tiny local broker over a local IPC transport. The broker keeps track of connected sessions and routes direct messages to the one you target by name or session ID. The extension gives you both a tool (`intercom`) and a small overlay UI (`/intercom` or `Alt+M`). Incoming messages wake idle recipients by default; active recipients see messages after the current tool call, when idle, or through explicit queue/steer delivery, and passive delivery is a discouraged opt-in for human-visible breadcrumbs only.
+Each pi session that has `pi-intercom` loaded connects to a tiny local broker over a local IPC transport. The broker keeps track of connected sessions and routes direct messages to the one you target by name or session ID. The extension gives you both a tool (`intercom`) and a small overlay UI (`/intercom` or `Alt+M`). Messages that do not request a reply default to steer: they wake idle recipients and reach active recipients after the current tool call. Explicit queue waits behind active work, and passive delivery is a discouraged opt-in for human-visible breadcrumbs only.
 
 ## Install
 
@@ -61,7 +61,7 @@ Coordinate with other local pi sessions on related codebases. Use `/skill:pi-int
 
 **Not when:** Unrelated codebases, trivial questions, or when you can proceed independently.
 
-**Principle:** Prefer non-blocking `send` with `delivery:"steer"` for live agent guidance, answers, corrections, and blockers. Use queue only when delay is intentional, and use blocking `ask` only when the sender must remain alive waiting for the answer.
+**Principle:** Non-blocking `send` defaults to steer for live agent guidance, answers, corrections, and blockers. Use explicit queue only when delay is intentional, and use blocking `ask` only when the sender must remain alive waiting for the answer.
 </pi-intercom>
 ```
 
@@ -97,10 +97,10 @@ intercom({ action: "list" })
 // →   ↳ self target unavailable; choose a peer from Other sessions; use pending/reply for inbound asks
 // → **Other sessions:**
 // → • research (6332faab) — ~/projects/api (claude-sonnet-4) [same cwd, thinking, state:busy, accepts_asks:false, pending_asks:1, last_intercom_activity:2m ago]
-// →   ↳ send accepted; steer for live guidance; ask only if sender must stay alive for a required reply (default returns peer_idle); queue only for intentional delay; passive discouraged
+// →   ↳ send defaults to steer; ask only if sender must stay alive for a required reply (default returns peer_idle); queue only for intentional delay; passive discouraged
 
-// Send live guidance without blocking this long-lived session
-intercom({ action: "send", to: "research", delivery: "steer", message: "Check if UserService.validate() handles null. Send the finding back with steer." })
+// Send live guidance without blocking this long-lived session; send defaults to steer
+intercom({ action: "send", to: "research", message: "Check if UserService.validate() handles null. Send the finding back." })
 // → Message sent to research. This session can end its turn or continue independent work.
 
 // Check connection status and the same live recipient guidance
@@ -135,7 +135,7 @@ Found the issue — UserService.validate() doesn't check for null input.
 See auth.ts:142-156.
 ```
 
-The reply hint (enabled by default) points to `intercom({ action: "reply", ... })`, so recipients do not need raw sender or `replyTo` IDs. Prefer explicit `delivery:"steer"` for meaningful live coordination: it wakes an idle recipient or reaches a busy recipient at the next tool boundary. The recipient should incorporate relevant context and continue its active task unless the message explicitly replaces it. Use `delivery:"queue"` only when delay is intentional; `queueMode:"replace"` keeps only the latest undelivered thread update. Attachment content is included in the agent-visible body and stored in Pi session history. Only passive `send` renders without waking the recipient model.
+The reply hint (enabled by default) points to `intercom({ action: "reply", ... })`, so recipients do not need raw sender or `replyTo` IDs. `send` and `reply` default to steer: they wake an idle recipient or reach a busy recipient at the next tool boundary. An omitted `ask` still honors recipient availability; use explicit steer only when the sender must remain alive for a busy recipient's reply. The recipient should incorporate relevant context and continue its active task unless the message explicitly replaces it. Use `delivery:"queue"` only when delay is intentional; `queueMode:"replace"` keeps only the latest undelivered thread update. Attachment content is included in the agent-visible body and stored in Pi session history. Only passive `send` renders without waking the recipient model.
 
 ## Workflow: Planner-Worker Coordination
 
@@ -159,7 +159,7 @@ intercom({ action: "list" })
 
 ### The Conversation
 
-Long-lived Pi sessions normally coordinate without blocking each other. The sender uses `send` plus steer and ends its turn or continues independent work. The recipient sees the message at its next tool boundary, incorporates relevant context, continues the active task, and sends any answer back with steer. A steer supplements the task unless it explicitly says to replace it.
+Long-lived Pi sessions normally coordinate without blocking each other. The sender uses `send`, which steers by default, and ends its turn or continues independent work. The recipient sees the message at its next tool boundary, incorporates relevant context, continues the active task, and sends any answer back with steer. A steer supplements the task unless it explicitly says to replace it.
 
 **Planner delegates work:**
 ```typescript
@@ -218,7 +218,7 @@ Use `ask` only when the sender process must remain alive and cannot safely conti
 
 ### `send` vs `ask`
 
-`send` is the default for agent-to-agent coordination. Pair it with `delivery:"steer"` for guidance, answers, corrections, blockers, and other context that may affect active work. It wakes idle recipients or reaches busy recipients at the next tool boundary, then returns after broker acceptance. Use queue only when delay is intentional, and passive only for human-visible breadcrumbs. If you want approval before non-reply sends, set `confirmSend: true`.
+`send` is the default for agent-to-agent coordination and uses steer when `delivery` is omitted. It wakes idle recipients or reaches busy recipients at the next tool boundary, then returns after broker acceptance. Use explicit queue only when delay is intentional, and passive only for human-visible breadcrumbs. If you want approval before non-reply sends, set `confirmSend: true`.
 
 `ask` sends and waits up to `askTimeoutMs` (default 2 minutes). Reserve `ask` plus steer for a sender process that must remain alive and cannot safely continue without the answer. Long-lived peers should use `send` plus steer and end their turn instead. A default ask to a peer publishing `accepts_asks:false` returns promptly with `reason:"peer_idle"`; an explicit steer ask keeps waiting.
 
@@ -333,7 +333,7 @@ The supervisor can reply with plain JSON or a fenced `json` block. If the reply 
 | `message` | string | Message text (for send/ask/reply) |
 | `attachments` | array | Optional `file`, `snippet`, or `context` attachments |
 | `replyTo` | string | Optional message ID for threading or replying to an `ask` |
-| `delivery` | string | Optional: `"steer"` is preferred for live coordination and injects after the current tool call, `"queue"` intentionally waits behind active work, and `"passive"` does not wake the recipient model (`send` only). |
+| `delivery` | string | Optional: omitted `send` defaults to `"steer"`, which injects after the current tool call; `"queue"` intentionally waits behind active work, and `"passive"` does not wake the recipient model (`send` only). |
 | `queueMode` | string | Optional with queued delivery: `"stack"` keeps all messages, `"replace"` keeps only the latest undelivered message for the same `threadId` after a short coalescing window. |
 | `threadId` | string | Required for `queueMode:"replace"`; stable topic key for replacement. |
 | `passive` | boolean | Legacy `send`-only alias for `delivery:"passive"`. Discouraged for agent-to-agent messages. |
@@ -358,7 +358,7 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 
 **`list`** — Returns the current session plus other active intercom-connected sessions with name, safe target, working directory, model, live status, and peer health tags: `state` (`idle`, `busy`, or `unknown`), `accepts_asks`, `pending_asks`, `last_intercom_activity`, and `last_seen`. Peer rows include live delivery guidance for `ask`, `send`, `queue`, `steer`, and the discouraged passive path; the self row says self-target delivery is unavailable and points to peer targets / `pending` / `reply`. Status is derived automatically from Pi lifecycle events: `idle`, `thinking`, or `tool:<name>`. If multiple sessions have the same name, use the displayed target exactly as shown, for example `to: "ca7bfec2"`. The target may be longer than eight characters when needed to avoid collisions.
 
-**`send`** — Sends a non-blocking message to the specified session and returns broker acceptance, not a later response. Prefer `delivery:"steer"` for guidance, answers, corrections, blockers, or other live coordination: it wakes idle recipients or reaches busy recipients at the next tool boundary. Use `delivery:"queue"` only when delay is intentional, and `delivery:"passive"`/`passive:true` only for human-visible breadcrumbs. `queueMode:"replace"` with a `threadId` replaces older undelivered intercom-staged messages for that thread after a short coalescing window; once a message is handed to Pi's native queue it cannot be keyed-replaced. Set `confirmSend: true` in config if you want a confirmation dialog for non-reply sends. Replies that include `replyTo` skip confirmation.
+**`send`** — Sends a non-blocking, default-steered message to the specified session and returns broker acceptance, not a later response. It wakes idle recipients or reaches busy recipients at the next tool boundary. Use `delivery:"queue"` only when delay is intentional, and `delivery:"passive"`/`passive:true` only for human-visible breadcrumbs. `queueMode:"replace"` with a `threadId` replaces older undelivered intercom-staged messages for that thread after a short coalescing window; once a message is handed to Pi's native queue it cannot be keyed-replaced. Set `confirmSend: true` in config if you want a confirmation dialog for non-reply sends. Replies that include `replyTo` skip confirmation.
 
 **`ask`** — Sends a message and waits for the recipient to reply (`askTimeoutMs`, default 2 minutes). Reserve it for a sender process that must remain alive and cannot safely continue without the answer; use `delivery:"steer"` so a busy recipient sees it at the next tool boundary. If the target publishes `accepts_asks:false`, a default blocking ask returns promptly with `reason:"peer_idle"`, while an explicit steer ask still waits. Only one pending waiting ask is allowed per session. Passive delivery is rejected.
 

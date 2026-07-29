@@ -22,7 +22,7 @@ export interface Message {
   timestamp: number;
   replyTo?: string;
   expectsReply?: boolean;
-  /** Explicit active-recipient behavior. Omit to use automatic recipient-state routing. */
+  /** Active-recipient behavior. Omitted delivery defaults to steer unless expectsReply is true. */
   delivery?: MessageDelivery;
   /** For delivery="queue": stack normally, or replace older undelivered messages in the same thread. */
   queueMode?: QueueMode;

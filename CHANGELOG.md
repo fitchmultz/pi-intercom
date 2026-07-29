@@ -12,9 +12,8 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 - Added `queueMode:"replace"` with `threadId` to replace older undelivered intercom-staged messages in the same thread before handing them to Pi.
 
 ### Changed
-- Cut model-facing coordination guidance over to prefer explicit steer for live agent guidance, answers, corrections, and blockers; queue is now documented only for intentional delay, and blocking asks are reserved for processes that must remain alive for the reply. Child supervisor decisions and interviews now use explicit steer while waiting.
+- Messages that do not request a reply now default to steer across tool, overlay, reply, and client sends, so live guidance cannot silently wait behind active recipient work. Explicit queue remains available only for intentional delay; passive delivery remains an explicit, discouraged opt-in via `delivery:"passive"` or legacy `passive:true`; and blocking asks are reserved for processes that must remain alive for the reply. Child supervisor decisions and interviews use explicit steer while waiting.
 - Raised the minimum `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` compatibility to 0.80.10. Compose now relies on Pi's complete terminal input framing, and the session picker uses the native `SelectList` navigation, scrolling, and truncation behavior.
-- `send` now wakes idle recipient agents by default and surfaces clearer guidance for active-recipient delivery; passive delivery is explicit via `delivery:"passive"` or legacy `passive:true` and discouraged for agent-to-agent coordination.
 - Session registration no longer carries the unused `pid`, `startedAt`, or `lastActivity` fields. Health reporting continues through `lastSeen` and `lastIntercomActivity`.
 
 ### Removed

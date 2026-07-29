@@ -431,7 +431,7 @@ export class IntercomClient extends EventEmitter {
       timestamp: Date.now(),
       replyTo: options.replyTo,
       expectsReply: options.expectsReply,
-      delivery: options.delivery,
+      delivery: options.delivery ?? (options.passive === true ? "passive" : options.expectsReply === true ? undefined : "steer"),
       queueMode: options.queueMode,
       threadId: options.threadId,
       passive: options.passive,

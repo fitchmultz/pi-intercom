@@ -41,15 +41,15 @@ Coordinate named Pi sessions on the same machine with the least context loss and
 
 | Action | Use for | Effect |
 | --- | --- | --- |
-| `send` | Guidance, answers, corrections, blockers, context, or other non-blocking coordination | Prefer `delivery:"steer"`: it wakes idle recipients or reaches busy recipients at the next tool boundary, then returns after broker acceptance. Use queue only when delay is intentional and passive only for human-visible breadcrumbs. |
+| `send` | Guidance, answers, corrections, blockers, context, or other non-blocking coordination | Defaults to steer: it wakes idle recipients or reaches busy recipients at the next tool boundary, then returns after broker acceptance. Use explicit queue only when delay is intentional and passive only for human-visible breadcrumbs. |
 | `ask` | A required answer when this process must remain alive waiting for it | Use `delivery:"steer"`; waits up to `askTimeoutMs` (default 2 minutes). Default asks to peers reporting `accepts_asks:false` return `delivered:true`, `replied:false`, `reason:"peer_idle"`, while explicit steer asks keep waiting; not passive. |
 | `reply` | Answering an inbound ask | Uses the active ask, or the single pending ask |
 | `pending` | Multiple or delayed inbound asks | Lists unresolved asks so you can disambiguate |
 | `status` | Troubleshooting connection state | Shows connection, active session count, and the same live recipient capability/guidance rows as `list` |
 
 5. Write compact messages with objective, scope, relevant files, stop boundary, and expected reply. Attachments only when the recipient needs the extra context.
-6. For live agent-to-agent coordination, use non-blocking `send` with `delivery:"steer"`, then end the turn or continue independent work. Use queue only when delay is intentional; optional `delivery:"queue", queueMode:"replace", threadId:"<non-empty>"` keeps only the latest undelivered update for that thread.
-7. Treat inbound steers as coordination within the active task: incorporate relevant context and continue. Replace the task only when the message explicitly says so. Reply to an active ask with `reply`; otherwise respond with `send` plus steer.
+6. For live agent-to-agent coordination, use non-blocking `send`; omitted delivery steers by default. Then end the turn or continue independent work. Use explicit queue only when delay is intentional; optional `delivery:"queue", queueMode:"replace", threadId:"<non-empty>"` keeps only the latest undelivered update for that thread.
+7. Treat inbound steers as coordination within the active task: incorporate relevant context and continue. Replace the task only when the message explicitly says so. Reply to an active ask with `reply`; otherwise respond with default-steered `send`.
 8. Use blocking `ask` only when this process must stay alive and cannot safely continue without the answer. After any tool result, handle the reply or error; do not assume delivery after failure.
 
 ## Supervisor escalations from pi-subagents
@@ -102,6 +102,6 @@ Read `references/peer-sessions.md` before starting a new visible peer session. S
 A good intercom-assisted turn ends with:
 
 - Target came from `list` or from the active inbound ask.
-- Action matched intent: `send` plus `delivery:"steer"` for live coordination, `ask` plus steer only for a required blocking reply, `reply` for an inbound ask, queue only for intentional delay, and passive only when deliberately not waking the model.
+- Action matched intent: default-steered `send` for live coordination, `ask` only for a required blocking reply, `reply` for an inbound ask, explicit queue only for intentional delay, and passive only when deliberately not waking the model.
 - Delivery result or failure was handled.
 - Any spawned peer was smoke-tested and either still needed or cleaned up.

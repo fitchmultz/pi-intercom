@@ -34,7 +34,7 @@ process.env.HOME = sharedHomeDir;
 process.env.USERPROFILE = sharedHomeDir;
 process.env.PI_CODING_AGENT_DIR = sharedAgentDir;
 const { IntercomClient } = await import("./broker/client.ts");
-const { MAX_FRAME_SIZE_BYTES } = await import("./broker/framing.ts");
+const { MAX_FRAME_SIZE_BYTES, writeMessage } = await import("./broker/framing.ts");
 const { getBrokerSocketPath } = await import("./broker/paths.ts");
 process.on("exit", () => {
   for (const broker of activeBrokers) signalBroker(broker, "SIGKILL");
@@ -585,7 +585,7 @@ test("intercom list and status show recipient capability and delivery guidance",
     assert.match(statusText, /Other sessions/);
     assert.match(statusText, /self target unavailable/);
     assert.match(statusText, /busy-peer/);
-    assert.match(statusText, /steer for live guidance/);
+    assert.match(statusText, /send defaults to steer/);
     assert.match(statusText, /queue only for intentional delay/);
   } finally {
     await busyPeer.disconnect().catch(() => undefined);
@@ -1033,9 +1033,10 @@ test("intercom tool accepts displayed short IDs when session names are duplicate
     }, new AbortController().signal, undefined, harness.ctx);
 
     assert.equal(result.isError, false);
-    assert.match(result.content[0]?.text ?? "", /wakes idle recipients/);
+    assert.match(result.content[0]?.text ?? "", /defaults to steer/);
     const [, message] = await messagePromise;
     assert.equal(message.content.text, "short id delivery works");
+    assert.equal(message.delivery, "steer");
 
     const tooShortPrefixResult = await intercomTool.execute("tool-too-short", {
       action: "send",
@@ -1060,6 +1061,7 @@ test("intercom tool accepts displayed short IDs when session names are duplicate
     const [askFrom, askMessage] = await askMessagePromise;
     assert.equal(askMessage.content.text, "short id ask works");
     assert.equal(askMessage.expectsReply, true);
+    assert.equal(askMessage.delivery, undefined);
     await receiver.send(askFrom.id, { text: "short id ask reply", replyTo: askMessage.id });
     const askResult = await askResultPromise;
     assert.equal(askResult.isError, false);
@@ -1352,7 +1354,7 @@ test("explicit queue asks wait for replies even when peer health says idle", { c
   }
 });
 
-test("busy interactive sessions idle-gate top-level asks without aborting", { concurrency: false }, async () => {
+test("busy interactive sessions idle-gate default asks and steer default sends without aborting", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { planner, cleanup } = await setupClients();
   let abortCount = 0;
@@ -1393,29 +1395,22 @@ test("busy interactive sessions idle-gate top-level asks without aborting", { co
     idle = false;
     const sent = await planner.send(target.id, {
       messageId: "interactive-busy-send",
-      text: "Plain send should wake after idle too.",
+      text: "Plain send should steer current work.",
     });
     assert.equal(sent.delivered, true);
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    assert.equal(abortCount, 0);
-    assert.equal(harness.sentMessages.length, 1);
-
-    idle = true;
-    await harness.emitLifecycle("agent_end");
-    await harness.emitLifecycle("agent_settled");
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise((resolve) => setImmediate(resolve));
     assert.equal(abortCount, 0);
     assert.equal(harness.sentMessages.length, 2);
     assert.equal(harness.sentMessages[1]?.message.customType, "intercom_message");
-    assert.equal(harness.sentMessages[1]?.options?.triggerTurn, true);
-    assert.match(harness.sentMessages[1]?.message.content ?? "", /Plain send should wake after idle too/);
+    assert.deepEqual(harness.sentMessages[1]?.options, { deliverAs: "steer" });
+    assert.match(harness.sentMessages[1]?.message.content ?? "", /Plain send should steer current work/);
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await cleanup();
   }
 });
 
-test("busy interactive sessions flush queued sends and asks together while asks get the trigger", { concurrency: false }, async () => {
+test("busy interactive sessions defer explicit queued sends and idle-gate default asks", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { planner, cleanup } = await setupClients();
   let idle = false;
@@ -1432,6 +1427,7 @@ test("busy interactive sessions flush queued sends and asks together while asks 
     assert.equal((await planner.send(target.id, {
       messageId: "queued-send-before-ask",
       text: "Context before the question.",
+      delivery: "queue",
     })).delivered, true);
     assert.equal((await planner.send(target.id, {
       messageId: "queued-ask-after-send",
@@ -1440,7 +1436,8 @@ test("busy interactive sessions flush queued sends and asks together while asks 
     })).delivered, true);
 
     await new Promise((resolve) => setTimeout(resolve, 250));
-    assert.equal(harness.sentMessages.length, 0);
+    assert.equal(harness.sentMessages.length, 1);
+    assert.deepEqual(harness.sentMessages[0]?.options, { deliverAs: "followUp" });
 
     idle = true;
     await harness.emitLifecycle("agent_end");
@@ -1458,7 +1455,7 @@ test("busy interactive sessions flush queued sends and asks together while asks 
   }
 });
 
-test("explicit queue and steer use Pi native delivery while busy", { concurrency: false }, async () => {
+test("omitted delivery defaults to steer while explicit queue stays deferred", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { planner, cleanup } = await setupClients();
   const harness = createExtensionHarness("native-delivery-worker", {
@@ -1472,6 +1469,10 @@ test("explicit queue and steer use Pi native delivery while busy", { concurrency
     const target = await waitForSessionByName(planner, "native-delivery-worker");
 
     assert.equal((await planner.send(target.id, {
+      messageId: "default-steer",
+      text: "Default to live steer.",
+    })).delivered, true);
+    assert.equal((await planner.send(target.id, {
       messageId: "native-queue",
       text: "Queue this behind current work.",
       delivery: "queue",
@@ -1483,11 +1484,47 @@ test("explicit queue and steer use Pi native delivery while busy", { concurrency
     })).delivered, true);
 
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(harness.sentMessages.length, 2);
-    assert.match(harness.sentMessages[0]?.message.content ?? "", /Queue this/);
-    assert.deepEqual(harness.sentMessages[0]?.options, { deliverAs: "followUp" });
-    assert.match(harness.sentMessages[1]?.message.content ?? "", /Steer after/);
-    assert.deepEqual(harness.sentMessages[1]?.options, { deliverAs: "steer" });
+    assert.equal(harness.sentMessages.length, 3);
+    assert.match(harness.sentMessages[0]?.message.content ?? "", /Default to live steer/);
+    assert.deepEqual(harness.sentMessages[0]?.options, { deliverAs: "steer" });
+    assert.match(harness.sentMessages[1]?.message.content ?? "", /Queue this/);
+    assert.deepEqual(harness.sentMessages[1]?.options, { deliverAs: "followUp" });
+    assert.match(harness.sentMessages[2]?.message.content ?? "", /Steer after/);
+    assert.deepEqual(harness.sentMessages[2]?.options, { deliverAs: "steer" });
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("pre-cutover omitted delivery still steers a busy recipient", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  const harness = createExtensionHarness("legacy-delivery-worker", {
+    hasUI: true,
+    isIdle: () => false,
+  });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const target = await waitForSessionByName(planner, "legacy-delivery-worker");
+    const legacySocket = (planner as unknown as { socket: net.Socket | null }).socket;
+    assert.ok(legacySocket);
+
+    writeMessage(legacySocket, {
+      type: "send",
+      to: target.id,
+      message: {
+        id: "legacy-default-steer",
+        timestamp: Date.now(),
+        content: { text: "Legacy sender omitted delivery." },
+      },
+    });
+
+    await waitForSentMessages(harness, 1);
+    assert.match(harness.sentMessages[0]?.message.content ?? "", /Legacy sender omitted delivery/);
+    assert.deepEqual(harness.sentMessages[0]?.options, { deliverAs: "steer" });
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await cleanup();
@@ -1894,7 +1931,7 @@ test("intercom tool validates passive and replace delivery options", { concurren
     assert.equal(passiveAsk.isError, true);
     const passiveAskText = passiveAsk.content[0]?.text ?? "";
     assert.match(passiveAskText, /delivery='passive' is only valid/);
-    assert.match(passiveAskText, /use send with delivery='steer' for normal live coordination/);
+    assert.match(passiveAskText, /normal send defaults to steer/);
     assert.match(passiveAskText, /ask with delivery='steer' only when the sender must stay alive and cannot safely continue without the reply/);
 
     const replaceWithoutThread = await intercomTool.execute("delivery-replace-no-thread", {
@@ -2307,7 +2344,7 @@ test("intercom tool advertises the steer-first coordination cutover", async () =
     const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
     const guidance = [intercomTool.description, intercomTool.promptSnippet, ...(intercomTool.promptGuidelines ?? [])].join("\n");
 
-    assert.match(guidance, /Prefer non-blocking send with delivery:?\"?steer/i);
+    assert.match(guidance, /send defaults to (?:delivery=)?['\"]?steer/i);
     assert.match(guidance, /queue only when delay is intentional/i);
     assert.match(guidance, /supplemental coordination within the active task/i);
     assert.match(guidance, /replace the task only when the message explicitly says so/i);
@@ -2680,6 +2717,7 @@ test("full ask/reply round-trip works with reply target resolved from current tu
     const reply = await replyPromise;
     assert.equal(reply.message.content.text, "Ship it.");
     assert.equal(reply.message.replyTo, askId);
+    assert.equal(reply.message.delivery, "steer");
     assert.deepEqual(replyTracker.listPending(Date.now()), []);
   } finally {
     await cleanup();

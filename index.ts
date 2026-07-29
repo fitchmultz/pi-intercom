@@ -452,10 +452,10 @@ function formatIntercomAge(timestamp: number | undefined, now: number): string {
 function sessionDeliveryGuidance(session: SessionInfo, isSelf: boolean): string {
   if (isSelf) return "self target unavailable; choose a peer from Other sessions; use pending/reply for inbound asks";
   const state = sessionBusyState(session);
-  if (state === "idle") return "send wakes; steer for live guidance; ask only if sender must stay alive for a required reply; queue only for intentional delay; passive discouraged";
-  if (session.acceptsAsks === false) return "send accepted; steer for live guidance; ask only if sender must stay alive for a required reply (default returns peer_idle); queue only for intentional delay; passive discouraged";
-  if (state === "busy") return "send accepted; steer for live guidance at next tool boundary; ask only if sender must stay alive for a required reply; queue only for intentional delay; passive discouraged";
-  return "state unknown; target is valid; prefer steer for live guidance; ask only if sender must stay alive for a required reply; queue only for intentional delay; passive discouraged";
+  if (state === "idle") return "send defaults to steer and wakes; ask only if sender must stay alive for a required reply; queue only for intentional delay; passive discouraged";
+  if (session.acceptsAsks === false) return "send defaults to steer; ask only if sender must stay alive for a required reply (default returns peer_idle); queue only for intentional delay; passive discouraged";
+  if (state === "busy") return "send defaults to steer at the next tool boundary; ask only if sender must stay alive for a required reply; queue only for intentional delay; passive discouraged";
+  return "state unknown; target is valid; send defaults to steer; ask only if sender must stay alive for a required reply; queue only for intentional delay; passive discouraged";
 }
 function formatSessionListRow(session: SessionInfo, currentCwd: string, isSelf: boolean, duplicates = new Set<string>(), allSessions: SessionInfo[] = [session], now = Date.now()): string {
   const name = session.name || "Unnamed session";
@@ -759,7 +759,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   }
   function requestedDelivery(message: Message): RequestedDelivery {
     if (message.passive === true || message.delivery === "passive") return "passive";
-    return message.delivery ?? "auto";
+    return message.delivery ?? (message.expectsReply === true ? "auto" : "steer");
   }
   function shouldTriggerTurn(message: Message): boolean {
     return requestedDelivery(message) !== "passive";
@@ -1694,19 +1694,19 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     label: "Intercom",
     description: `Send a message to another pi session running on this machine.
 Use this to communicate findings, request help, or coordinate work with other sessions.
-Prefer non-blocking send with delivery:"steer" for guidance, answers, corrections, or blockers that may affect active work. Use queue only when delay is intentional; use ask only when this process must remain alive waiting for the reply.
+Non-blocking send defaults to steer for guidance, answers, corrections, or blockers that may affect active work. Use queue only when delay is intentional; use ask only when this process must remain alive waiting for the reply.
 
 Usage:
   intercom({ action: "list" })                    → List active sessions
-  intercom({ action: "send", to: "session-name", delivery: "steer", message: "..." })  → Send live coordination
+  intercom({ action: "send", to: "session-name", message: "..." })  → Send live coordination (defaults to steer)
   intercom({ action: "ask", to: "session-name", delivery: "steer", message: "..." })   → Blocking wait only when sender must stay alive
   intercom({ action: "reply", message: "..." })                      → Reply to the active/single pending ask
   intercom({ action: "pending" })                                      → List unresolved inbound asks
   intercom({ action: "status" })                  → Show connection status`,
     promptSnippet:
-      "Coordinate with local Pi sessions. Prefer non-blocking send with delivery steer for live agent guidance; queue only for intentional delay and ask only for a required blocking reply.",
+      "Coordinate with local Pi sessions. Non-blocking send defaults to steer for live agent guidance; queue only for intentional delay and ask only for a required blocking reply.",
     promptGuidelines: [
-      "Prefer action='send' with delivery='steer' for agent-to-agent guidance, answers, corrections, blockers, or other context that may affect active work.",
+      "Action='send' defaults to delivery='steer' for agent-to-agent guidance, answers, corrections, blockers, or other context that may affect active work.",
       "Use delivery='queue' only when delay is intentional, and passive only when the recipient model should not see the message now.",
       "Treat inbound steered messages as supplemental coordination within the active task: incorporate relevant context and continue; replace the task only when the message explicitly says so.",
       "Use action='reply' for an active inbound ask. Otherwise respond with send plus steer; use blocking ask only when this process must stay alive and cannot safely continue without the answer.",
@@ -1732,7 +1732,7 @@ Usage:
         description: "Message ID to reply to (for threading or responding to an 'ask')",
       })),
       delivery: Type.Optional(StringEnum(["queue", "steer", "passive"] as const, {
-        description: "Delivery mode: 'steer' is preferred for live agent coordination and injects after the current tool call; 'queue' intentionally waits behind active work; 'passive' does not wake the recipient model.",
+        description: "Delivery mode. Omitted send delivery defaults to 'steer', which injects after the current tool call. Use 'queue' only to intentionally wait behind active work; 'passive' does not wake the recipient model.",
       })),
       queueMode: Type.Optional(StringEnum(["stack", "replace"] as const, {
         description: "For delivery='queue': 'stack' keeps all messages; 'replace' keeps only the latest undelivered message for the same threadId.",
@@ -1770,7 +1770,7 @@ Usage:
       }
       if (delivery === "passive" && action !== "send") {
         return {
-          content: [{ type: "text", text: "delivery='passive' is only valid for action='send'. Passive delivery is for human-visible breadcrumbs and is discouraged for agent-to-agent coordination; use send with delivery='steer' for normal live coordination, and ask with delivery='steer' only when the sender must stay alive and cannot safely continue without the reply." }],
+          content: [{ type: "text", text: "delivery='passive' is only valid for action='send'. Passive delivery is for human-visible breadcrumbs and is discouraged for agent-to-agent coordination; normal send defaults to steer. Use ask with delivery='steer' only when the sender must stay alive and cannot safely continue without the reply." }],
           isError: true,
           details: { error: true },
         };
@@ -1807,7 +1807,7 @@ Usage:
       const cleanedThreadId = typeof threadId === "string" ? threadId.trim() : undefined;
       if (queueMode !== undefined && deliveryMode !== "queue") {
         return {
-          content: [{ type: "text", text: "'queueMode' is only valid with delivery='queue'. Use queue only for intentionally deferred work; otherwise omit queueMode and prefer delivery='steer' for live agent coordination. Avoid passive for agent-to-agent coordination." }],
+          content: [{ type: "text", text: "'queueMode' is only valid with delivery='queue'. Use queue only for intentionally deferred work; otherwise omit queueMode and use default-steered send for live agent coordination. Avoid passive for agent-to-agent coordination." }],
           isError: true,
           details: failureDetails("invalid_queue_arguments", [{ action: "send", guidance: "Set delivery='queue', or omit queueMode and threadId." }], { error: true }),
         };
@@ -1897,7 +1897,7 @@ Usage:
                   ? " (steers active recipient after the current tool call)"
                   : deliveryMode === "queue"
                     ? " (intentionally deferred behind active recipient work)"
-                    : " (accepted; wakes idle recipients; active recipients may see it after the current tool call or when idle; use delivery:'steer' for live coordination)";
+                    : " (defaults to steer; wakes idle recipients and steers active recipients after the current tool call)";
             return {
               content: [{ type: "text", text: result.queued ? `Message queued for ${to} (${result.reason ?? "queued"})` : `Message sent to ${to}${replyModeHint}` }],
               isError: false,
@@ -1988,7 +1988,7 @@ Usage:
               return {
                 content: [{ type: "text", text: `Delivered ask to ${to}; peer reports it is not accepting asks right now (peer_idle).` }],
                 isError: false,
-                details: { messageId: sendResult.id, delivered: true, replied: false, reason: "peer_idle", reasonCode: "recipient_not_accepting_asks", nextActions: [{ action: "send", guidance: "Use send with delivery='steer' for non-blocking live coordination; queue only when delay is intentional." }] },
+                details: { messageId: sendResult.id, delivered: true, replied: false, reason: "peer_idle", reasonCode: "recipient_not_accepting_asks", nextActions: [{ action: "send", guidance: "Use default-steered send for non-blocking live coordination; queue only when delay is intentional." }] },
               };
             }
             replyMessage = await sendAskTransaction(connectedClient, sendTo, questionId, sendOptions, _signal, recordSent);

@@ -61,7 +61,7 @@ test("reply with to resolves matching pending ask", () => {
 
   assert.equal(tracker.resolveReplyTarget({ to: "reviewer" }, 1002).message.id, "ask-2");
   assert.equal(tracker.resolveReplyTarget({ to: "planner-id" }, 1002).message.id, "ask-1");
-  assert.throws(() => tracker.resolveReplyTarget({ to: "review" }, 1002), /too short.*reviewer \(reviewer-, replyTo: ask-2\)/);
+  assert.throws(() => tracker.resolveReplyTarget({ to: "review" }, 1002), /too short.*reviewer: to: "reviewer-" or replyTo: "ask-2"/);
 });
 
 test("reply with explicit to must match even when only one pending ask exists", () => {
@@ -92,7 +92,7 @@ test("reply errors for duplicate sender names include copyable targets", () => {
 
   assert.throws(
     () => tracker.resolveReplyTarget({ to: "planner" }, 1002),
-    /use one of these targets or pass replyTo: planner \(planner-1, replyTo: ask-1\), planner \(planner-2, replyTo: ask-2\)/,
+    /use one of: planner: to: "planner-1" or replyTo: "ask-1", planner: to: "planner-2" or replyTo: "ask-2"/,
   );
 });
 
@@ -123,11 +123,11 @@ test("reply rejects too-short sender ID prefixes with a helpful target hint", ()
 
   assert.throws(
     () => tracker.resolveReplyTarget({ to: "abcdefg" }, 1002),
-    /too short.*first \(abcdefgh, replyTo: ask-1\)/,
+    /too short.*first: to: "abcdefgh" or replyTo: "ask-1"/,
   );
   assert.throws(
     () => tracker.resolveReplyTarget({ to: "abcdefg", replyTo: "ask-1" }, 1002),
-    /too short.*first \(abcdefgh, replyTo: ask-1\)/,
+    /too short.*first: to: "abcdefgh" or replyTo: "ask-1"/,
   );
 });
 
@@ -139,7 +139,7 @@ test("reply duplicate sender options avoid name and prefix collisions", () => {
 
   assert.throws(
     () => tracker.resolveReplyTarget({ to: "planner" }, 1003),
-    /planner \(abcdefgh1, replyTo: ask-1\), planner \(abcdefgi, replyTo: ask-2\)/,
+    /planner: to: "abcdefgh1" or replyTo: "ask-1", planner: to: "abcdefgi" or replyTo: "ask-2"/,
   );
 });
 

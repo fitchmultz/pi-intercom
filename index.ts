@@ -6,14 +6,14 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import { IntercomClient, type SendResult } from "./broker/client.ts";
-import { spawnBrokerIfNeeded } from "./broker/spawn.ts";
+import { isBrokerRunning, spawnBrokerIfNeeded } from "./broker/spawn.ts";
 import { SessionListOverlay } from "./ui/session-list.ts";
 import { ComposeOverlay, type ComposeResult } from "./ui/compose.ts";
 import { InlineMessageComponent } from "./ui/inline-message.ts";
 import { loadConfig, type IntercomConfig } from "./config.ts";
 import type { SessionInfo, Message, Attachment, MessageDelivery, QueueMode } from "./types.ts";
 import { ReplyTracker } from "./reply-tracker.ts";
-import { formatSessionTarget, formatTargetOptions, targetDisplayName, resolveSessionTarget as resolveSessionTargetValue } from "./session-targets.ts";
+import { formatPeerAwarenessHint, formatSessionTarget, formatTargetOptions, resolveSessionProjectId, targetDisplayName, resolveSessionTarget as resolveSessionTargetValue } from "./session-targets.ts";
 import { registerSubagentLiveEventHandlers } from "./subagent-live-events.ts";
 
 const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
@@ -27,6 +27,7 @@ const INTERCOM_DETACH_RESPONSE_TIMEOUT_MS = 500;
 const INBOUND_FLUSH_DELAY_MS = 200;
 const INBOUND_IDLE_RETRY_MS = 500;
 const NON_UI_REPLACE_FLUSH_DELAY_MS = 1_600;
+const PEER_AWARENESS_LIST_TIMEOUT_MS = 75;
 const SUBAGENT_PROGRESS_UPDATE_MAX_AGE_MS = 60_000;
 const DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX = "subagent-chat";
 const RECIPIENT_TURN_FAILED_PREFIX = "Recipient turn failed:";
@@ -551,9 +552,23 @@ function shellQuote(value: string): string {
 function localForkStartCommand(): string {
   return `pi --name worker --extension ${shellQuote(path.join(PACKAGE_ROOT, "index.ts"))} --skill ${shellQuote(path.join(PACKAGE_ROOT, "skills"))}`;
 }
+async function settleWithin<T>(operation: () => Promise<T>, timeoutMs: number): Promise<T | null> {
+  return await new Promise((resolve) => {
+    let settled = false;
+    const finish = (value: T | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    void Promise.resolve().then(operation).then((value) => finish(value), () => finish(null));
+  });
+}
 export default function piIntercomExtension(pi: ExtensionAPI) {
   let client: IntercomClient | null = null;
   const config: IntercomConfig = loadConfig();
+  const childOrchestratorMetadata = readChildOrchestratorMetadata();
   let runtimeContext: ExtensionContext | null = null;
   let currentSessionId: string | null = null;
   let currentModel = "unknown";
@@ -664,6 +679,18 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     clearTimeout(startupConnectTimer);
     startupConnectTimer = null;
   }
+  function scheduleStartupConnection(ctx: ExtensionContext, generation: number): void {
+    clearStartupConnectTimer();
+    startupConnectTimer = setTimeout(() => {
+      startupConnectTimer = null;
+      if (!getLiveContext(ctx, generation)) return;
+      void ensureConnected("startup").catch(() => {
+        if (!getLiveContext(ctx, generation)) return;
+        client = null;
+        scheduleReconnect();
+      });
+    }, 0);
+  }
   function clearInboundFlushTimer(): void {
     if (!inboundFlushTimer) {
       return;
@@ -706,17 +733,19 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     const lifecycleStatus = activeToolName ? `tool:${activeToolName}` : agentRunning ? "thinking" : "idle";
     return config.status ? `${lifecycleStatus} · ${config.status}` : lifecycleStatus;
   }
-  function buildRegistration(): Omit<SessionInfo, "id"> {
+  async function buildRegistration(): Promise<Omit<SessionInfo, "id">> {
     const liveContext = getLiveContext();
     if (!liveContext || !currentSessionId) {
       throw new Error("Intercom runtime not initialized");
     }
 
     const identity = buildPresenceIdentity(pi, currentSessionId);
+    const cwd = liveContext.cwd ?? process.cwd();
     return {
       name: identity.name,
-      cwd: liveContext.cwd ?? process.cwd(),
+      cwd,
       model: currentModel,
+      projectId: await resolveSessionProjectId(cwd),
       lastSeen: Date.now(),
       status: currentStatus(),
       ...buildPresenceHealth(),
@@ -1070,7 +1099,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       });
     }, getReconnectDelayMs());
   }
-  async function ensureConnected(reason: "startup" | "background" | "tool" | "overlay"): Promise<IntercomClient> {
+  async function ensureConnected(reason: "startup" | "background" | "tool" | "overlay" | "peer-awareness"): Promise<IntercomClient> {
     if (disposed) {
       throw new Error("Intercom shutting down");
     }
@@ -1092,8 +1121,10 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       client = nextClient;
       attachClientHandlers(nextClient);
       try {
-        await spawnBrokerIfNeeded(config.brokerCommand, config.brokerArgs);
-        await nextClient.connect(buildRegistration());
+        if (reason !== "peer-awareness") {
+          await spawnBrokerIfNeeded(config.brokerCommand, config.brokerArgs);
+        }
+        await nextClient.connect(await buildRegistration());
         if (!getLiveContext(contextAtStart, generationAtStart)) {
           await nextClient.disconnect();
           throw new Error("Intercom runtime no longer active");
@@ -1308,20 +1339,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     agentRunning = false;
     lastIntercomActivity = 0;
     activeTools.clear();
-    const startupGeneration = runtimeGeneration;
-    startupConnectTimer = setTimeout(() => {
-      startupConnectTimer = null;
-      if (!getLiveContext(ctx, startupGeneration)) {
-        return;
-      }
-      void ensureConnected("startup").catch(() => {
-        if (!getLiveContext(ctx, startupGeneration)) {
-          return;
-        }
-        client = null;
-        scheduleReconnect();
-      });
-    }, 0);
+    scheduleStartupConnection(ctx, runtimeGeneration);
   });
   
   pi.on("session_shutdown", async () => {
@@ -1436,6 +1454,36 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       });
     }
   });
+  pi.on("before_agent_start", async (event, ctx) => {
+    if (childOrchestratorMetadata) return;
+    const generation = runtimeGeneration;
+    if (!getLiveContext(ctx, generation)) return;
+
+    const deadline = Date.now() + PEER_AWARENESS_LIST_TIMEOUT_MS;
+    let activeClient = client?.isConnected() ? client : null;
+    if (!activeClient) {
+      clearStartupConnectTimer();
+      const brokerAvailable = await settleWithin(() => isBrokerRunning(), PEER_AWARENESS_LIST_TIMEOUT_MS);
+      const connectBudgetMs = deadline - Date.now();
+      if (brokerAvailable && connectBudgetMs > 0) {
+        activeClient = await settleWithin(() => ensureConnected("peer-awareness"), connectBudgetMs);
+      }
+      if (!activeClient) {
+        if (getLiveContext(ctx, generation)) scheduleStartupConnection(ctx, generation);
+        return;
+      }
+    }
+
+    const currentBrokerSessionId = activeClient.sessionId;
+    const remainingMs = deadline - Date.now();
+    if (!currentBrokerSessionId || remainingMs <= 0 || !getLiveContext(ctx, generation)) return;
+
+    const sessions = await settleWithin(() => activeClient.listSessions(), remainingMs);
+    if (!sessions || client !== activeClient || !getLiveContext(ctx, generation)) return;
+    const hint = formatPeerAwarenessHint(sessions, currentBrokerSessionId);
+    if (!hint) return;
+    return { systemPrompt: `${event.systemPrompt}\n\n${hint}` };
+  });
 
   pi.registerMessageRenderer("intercom_message", (message, _options, theme) => {
     const details = message.details as { from: SessionInfo; message: Message; replyCommand?: string; bodyText?: string } | undefined;
@@ -1443,7 +1491,6 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     return new InlineMessageComponent(details.from, details.message, theme, details.replyCommand, details.bodyText);
   });
 
-  const childOrchestratorMetadata = readChildOrchestratorMetadata();
   if (childOrchestratorMetadata) {
     pi.registerTool({
       name: "contact_supervisor",

@@ -1,5 +1,6 @@
 import { spawn } from "child_process";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import { mkdir } from "fs/promises";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import net from "net";
@@ -137,7 +138,7 @@ function toError(error: unknown): Error {
 }
 
 export async function spawnBrokerIfNeeded(brokerCommand: string, brokerArgs: string[]): Promise<void> {
-  mkdirSync(INTERCOM_DIR, { recursive: true });
+  await mkdir(INTERCOM_DIR, { recursive: true });
 
   if (await isBrokerRunning()) {
     return;
@@ -201,7 +202,7 @@ export async function spawnBrokerIfNeeded(brokerCommand: string, brokerArgs: str
   }
 }
 
-async function isBrokerRunning(): Promise<boolean> {
+export async function isBrokerRunning(): Promise<boolean> {
   return checkSocketConnectable();
 }
 

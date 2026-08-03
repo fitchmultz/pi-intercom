@@ -9,6 +9,7 @@ import { spawn, type ChildProcessByStdio } from "node:child_process";
 import net from "node:net";
 import type { Readable } from "node:stream";
 import { ReplyTracker } from "./reply-tracker.ts";
+import { resolveSessionProjectId } from "./session-targets.ts";
 import { ComposeOverlay } from "./ui/compose.ts";
 import type { Message, SessionInfo } from "./types.ts";
 
@@ -311,9 +312,11 @@ function createExtensionHarness(sessionName = "child-worker", options: {
     entries,
     sentMessages,
     async emitLifecycle(event: string, payload: unknown = {}, eventContext: unknown = ctx) {
+      const results: unknown[] = [];
       for (const handler of lifecycleHandlers.get(event) ?? []) {
-        await handler(payload, eventContext);
+        results.push(await handler(payload, eventContext));
       }
+      return results;
     },
   };
 }
@@ -539,6 +542,67 @@ test("intercom tool empty list output gives local fork next steps", { concurrenc
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await stopBroker(broker);
+  }
+});
+
+test("before_agent_start adds a bounded hint only for same-project peers", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const broker = await setupBroker();
+  const related = new IntercomClient();
+  const unrelated = new IntercomClient();
+  const harness = createExtensionHarness("ambient-controller");
+  const unrelatedDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-unrelated-"));
+
+  try {
+    await connectClient(related, "same-project-peer", {
+      cwd: path.join(repoDir, "..", "another-worktree"),
+      projectId: await resolveSessionProjectId(repoDir),
+    });
+    await connectClient(unrelated, "unrelated-peer", {
+      cwd: unrelatedDir,
+      projectId: await resolveSessionProjectId(unrelatedDir),
+    });
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+
+    const results = await harness.emitLifecycle("before_agent_start", { systemPrompt: "base prompt" });
+    const update = results.find((result) => result && typeof result === "object" && "systemPrompt" in result) as { systemPrompt: string } | undefined;
+    assert.ok(update);
+    assert.match(update.systemPrompt, /^base prompt\n\n1 other Pi session is connected to this project\./);
+    assert.doesNotMatch(update.systemPrompt, /same-project-peer|unrelated-peer/);
+  } finally {
+    await related.disconnect().catch(() => undefined);
+    await unrelated.disconnect().catch(() => undefined);
+    await harness.emitLifecycle("session_shutdown");
+    await stopBroker(broker);
+    rmSync(unrelatedDir, { recursive: true, force: true });
+  }
+});
+
+test("before_agent_start fails open while project identity resolution is slow", { concurrency: false, skip: process.platform === "win32" }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const broker = await setupBroker();
+  const harness = createExtensionHarness("slow-project-controller");
+  const fakeBin = mkdtempSync(path.join(tmpdir(), "pi-intercom-slow-git-"));
+  const previousPath = process.env.PATH;
+  writeFileSync(path.join(fakeBin, "git"), "#!/usr/bin/env node\nsetTimeout(() => process.exit(1), 2000);\n", { mode: 0o755 });
+
+  try {
+    process.env.PATH = `${fakeBin}${path.delimiter}${previousPath ?? ""}`;
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+
+    const startedAt = Date.now();
+    const results = await harness.emitLifecycle("before_agent_start", { systemPrompt: "base prompt" });
+    assert.ok(Date.now() - startedAt < 250, "peer awareness should fail open before slow Git resolution settles");
+    assert.equal(results.some((result) => result && typeof result === "object" && "systemPrompt" in result), false);
+    await new Promise((resolve) => setTimeout(resolve, 550));
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    await harness.emitLifecycle("session_shutdown");
+    await stopBroker(broker);
+    rmSync(fakeBin, { recursive: true, force: true });
   }
 });
 

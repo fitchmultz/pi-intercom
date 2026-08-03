@@ -3,7 +3,7 @@ import net from "net";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.js";
 import { getBrokerSocketPath } from "./paths.js";
-import { isMessage, isSessionRegistration } from "../types.js";
+import { isMessage, normalizeSessionInfo } from "../types.js";
 import type { SessionInfo, Message, Attachment, MessageDelivery, QueueMode } from "../types.js";
 
 const BROKER_SOCKET = getBrokerSocketPath();
@@ -42,12 +42,6 @@ export interface SendResult {
 
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
-}
-
-function isSessionInfo(value: unknown): value is SessionInfo {
-  return typeof value === "object" && value !== null
-    && typeof (value as { id?: unknown }).id === "string"
-    && isSessionRegistration(value);
 }
 
 export class IntercomClient extends EventEmitter {
@@ -249,7 +243,8 @@ export class IntercomClient extends EventEmitter {
 
       case "sessions": {
         const { requestId, sessions } = brokerMessage;
-        if (typeof requestId !== "string" || !Array.isArray(sessions) || !sessions.every(isSessionInfo)) {
+        const normalizedSessions = Array.isArray(sessions) ? sessions.map(normalizeSessionInfo) : null;
+        if (typeof requestId !== "string" || !normalizedSessions || normalizedSessions.some((session) => session === null)) {
           throw new Error("Invalid sessions message");
         }
 
@@ -260,17 +255,18 @@ export class IntercomClient extends EventEmitter {
         }
 
         this.pendingLists.delete(requestId);
-        pending.resolve(sessions);
+        pending.resolve(normalizedSessions as SessionInfo[]);
         break;
       }
 
       case "message": {
         const { from, message } = brokerMessage;
-        if (!isSessionInfo(from) || !isMessage(message)) {
+        const normalizedFrom = normalizeSessionInfo(from);
+        if (!normalizedFrom || !isMessage(message)) {
           throw new Error("Invalid message event");
         }
 
-        this.emit("message", from, message);
+        this.emit("message", normalizedFrom, message);
         break;
       }
 

@@ -3,6 +3,8 @@ export interface SessionInfo {
   name?: string;
   cwd: string;
   model: string;
+  /** Opaque same-repository/worktree identity used for ambient peer awareness. */
+  projectId?: string;
   status?: string;
   /** Last time the broker observed any activity from this session (liveness). */
   lastSeen?: number;
@@ -63,6 +65,14 @@ export function isAttachment(value: unknown): value is Attachment {
   }
 
   return attachment.language === undefined || typeof attachment.language === "string";
+}
+
+export function normalizeSessionInfo(value: unknown): SessionInfo | null {
+  if (typeof value !== "object" || value === null || typeof (value as { id?: unknown }).id !== "string") return null;
+  if (isSessionRegistration(value)) return value as SessionInfo;
+  if (!("projectId" in value)) return null;
+  const { projectId: _projectId, ...withoutProjectId } = value as Record<string, unknown>;
+  return isSessionRegistration(withoutProjectId) ? withoutProjectId as unknown as SessionInfo : null;
 }
 
 export function isMessage(value: unknown): value is Message {
@@ -147,6 +157,7 @@ export function isSessionRegistration(value: unknown): value is Omit<SessionInfo
   const session = value as Record<string, unknown>;
   if (typeof session.cwd !== "string" || typeof session.model !== "string") return false;
   if (session.name !== undefined && typeof session.name !== "string") return false;
+  if (session.projectId !== undefined && (typeof session.projectId !== "string" || !/^[a-f0-9]{64}$/.test(session.projectId))) return false;
   if (session.status !== undefined && typeof session.status !== "string") return false;
   if (session.lastSeen !== undefined && typeof session.lastSeen !== "number") return false;
   if (session.lastIntercomActivity !== undefined && typeof session.lastIntercomActivity !== "number") return false;

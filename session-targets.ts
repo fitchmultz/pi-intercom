@@ -1,6 +1,15 @@
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import path from "node:path";
+
 export interface TargetIdentity {
   id: string;
   name?: string;
+}
+
+export interface ProjectSessionIdentity extends TargetIdentity {
+  cwd: string;
+  projectId?: string;
 }
 
 export const MIN_SESSION_TARGET_PREFIX_LENGTH = 8;
@@ -14,6 +23,39 @@ export interface TargetResolution<T extends TargetIdentity> {
 
 export function shortSessionId(sessionId: string): string {
   return sessionId.slice(0, MIN_SESSION_TARGET_PREFIX_LENGTH);
+}
+
+function normalizedPath(value: string): string {
+  const resolved = path.resolve(value);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function resolveGitCommonDirectory(cwd: string): Promise<string | undefined> {
+  const env = { ...process.env };
+  delete env.GIT_DIR;
+  delete env.GIT_COMMON_DIR;
+  delete env.GIT_WORK_TREE;
+  return new Promise((resolve) => {
+    execFile("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"], {
+      cwd: path.dirname(process.execPath),
+      encoding: "utf8",
+      env,
+      maxBuffer: 4096,
+      timeout: 500,
+      windowsHide: true,
+    }, (error, stdout) => {
+      const gitDirectory = error ? "" : stdout.trim();
+      resolve(gitDirectory && !/[\0\r\n]/.test(gitDirectory)
+        ? normalizedPath(path.resolve(cwd, gitDirectory))
+        : undefined);
+    });
+  });
+}
+
+export async function resolveSessionProjectId(cwd: string): Promise<string> {
+  const gitDirectory = await resolveGitCommonDirectory(cwd);
+  const identity = gitDirectory ? `git:${gitDirectory}` : `cwd:${normalizedPath(cwd)}`;
+  return createHash("sha256").update(identity).digest("hex");
 }
 
 function normalizedNames(sessions: TargetIdentity[]): Set<string> {
@@ -60,6 +102,25 @@ export function targetDisplayName(session: TargetIdentity, allSessions: TargetId
   return duplicateName || nameConflictsWithOtherIdPrefix
     ? `${session.name} (${formatSessionTarget(session, allSessions)})`
     : session.name;
+}
+
+export function formatPeerAwarenessHint<T extends ProjectSessionIdentity>(sessions: T[], currentSessionId: string): string | undefined {
+  const current = sessions.find((session) => session.id === currentSessionId);
+  if (!current) return undefined;
+
+  const peers = sessions.filter((session) => {
+    if (session.id === currentSessionId) return false;
+    if (session.cwd === current.cwd) return true;
+    return Boolean(current.projectId && session.projectId && session.projectId === current.projectId);
+  });
+  if (peers.length === 0) return undefined;
+
+  const sameCheckout = peers.filter((session) => session.cwd === current.cwd).length;
+  const peerCount = `${peers.length} other Pi session${peers.length === 1 ? " is" : "s are"}`;
+  const checkoutCount = sameCheckout > 0
+    ? ` (${sameCheckout} in this checkout)`
+    : "";
+  return `${peerCount} connected to this project${checkoutCount}. If you have not checked them for this task, use intercom({ action: "list" }) before duplicating substantial work or changing shared state. Coordinate only when work overlaps; use subagent controls for managed child runs.`;
 }
 
 export function resolveSessionTarget<T extends TargetIdentity>(sessions: T[], rawTarget: string): TargetResolution<T> {

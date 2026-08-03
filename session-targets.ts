@@ -31,10 +31,15 @@ function normalizedPath(value: string): string {
 }
 
 function resolveGitCommonDirectory(cwd: string): Promise<string | undefined> {
+  const env = { ...process.env };
+  delete env.GIT_DIR;
+  delete env.GIT_COMMON_DIR;
+  delete env.GIT_WORK_TREE;
   return new Promise((resolve) => {
     execFile("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"], {
       cwd: path.dirname(process.execPath),
       encoding: "utf8",
+      env,
       maxBuffer: 4096,
       timeout: 500,
       windowsHide: true,

@@ -62,6 +62,28 @@ test("resolveSessionProjectId matches a repository and linked worktree", async (
   }
 });
 
+test("resolveSessionProjectId ignores inherited Git repository overrides", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "pi-intercom-git-env-"));
+  const previous = new Map(["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"].map((key) => [key, process.env[key]]));
+  try {
+    const first = path.join(root, "first");
+    const second = path.join(root, "second");
+    execFileSync("git", ["init", "-q", first], { stdio: "ignore" });
+    execFileSync("git", ["init", "-q", second], { stdio: "ignore" });
+    process.env.GIT_DIR = path.join(first, ".git");
+    process.env.GIT_COMMON_DIR = path.join(first, ".git");
+    process.env.GIT_WORK_TREE = first;
+
+    assert.notEqual(await resolveSessionProjectId(first), await resolveSessionProjectId(second));
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("resolveSessionProjectId runs Git outside the project checkout", { skip: process.platform === "win32" }, async () => {
   const root = mkdtempSync(path.join(tmpdir(), "pi-intercom-git-cwd-"));
   const previousPath = process.env.PATH;

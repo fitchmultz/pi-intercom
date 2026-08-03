@@ -67,6 +67,14 @@ export function isAttachment(value: unknown): value is Attachment {
   return attachment.language === undefined || typeof attachment.language === "string";
 }
 
+export function normalizeSessionInfo(value: unknown): SessionInfo | null {
+  if (typeof value !== "object" || value === null || typeof (value as { id?: unknown }).id !== "string") return null;
+  if (isSessionRegistration(value)) return value as SessionInfo;
+  if (!("projectId" in value)) return null;
+  const { projectId: _projectId, ...withoutProjectId } = value as Record<string, unknown>;
+  return isSessionRegistration(withoutProjectId) ? withoutProjectId as unknown as SessionInfo : null;
+}
+
 export function isMessage(value: unknown): value is Message {
   if (typeof value !== "object" || value === null) {
     return false;

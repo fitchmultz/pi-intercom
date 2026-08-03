@@ -33,6 +33,7 @@ function normalizedPath(value: string): string {
 function resolveGitCommonDirectory(cwd: string): Promise<string | undefined> {
   return new Promise((resolve) => {
     execFile("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"], {
+      cwd: path.dirname(process.execPath),
       encoding: "utf8",
       maxBuffer: 4096,
       timeout: 500,

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { formatPeerAwarenessHint, formatSessionTarget, resolveSessionProjectId, resolveSessionTarget, targetDisplayName } from "./session-targets.ts";
@@ -58,6 +58,27 @@ test("resolveSessionProjectId matches a repository and linked worktree", async (
     assert.equal(await resolveSessionProjectId(path.join(repo, "src")), await resolveSessionProjectId(path.join(worktree, "src")));
     assert.notEqual(await resolveSessionProjectId(repo), await resolveSessionProjectId(path.join(root, "unrelated")));
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("resolveSessionProjectId runs Git outside the project checkout", { skip: process.platform === "win32" }, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "pi-intercom-git-cwd-"));
+  const previousPath = process.env.PATH;
+  try {
+    const fakeBin = path.join(root, "bin");
+    const project = path.join(root, "untrusted-project");
+    const capturedCwd = path.join(root, "cwd.txt");
+    mkdirSync(fakeBin, { recursive: true });
+    mkdirSync(project, { recursive: true });
+    writeFileSync(path.join(fakeBin, "git"), `#!/usr/bin/env node\nrequire("node:fs").writeFileSync(${JSON.stringify(capturedCwd)}, process.cwd());\nconsole.log(${JSON.stringify(path.join(root, "common.git"))});\n`, { mode: 0o755 });
+    process.env.PATH = `${fakeBin}${path.delimiter}${previousPath ?? ""}`;
+
+    await resolveSessionProjectId(project);
+    assert.equal(readFileSync(capturedCwd, "utf8"), path.dirname(process.execPath));
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
     rmSync(root, { recursive: true, force: true });
   }
 });

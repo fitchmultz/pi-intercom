@@ -4,6 +4,9 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Fixed
+- Pending asks now label their `replyTo` IDs and include copy-ready reply calls; ambiguous target errors list valid `to` and `replyTo` values separately.
+
 ## [0.7.0] - 2026-08-02
 
 ### Added

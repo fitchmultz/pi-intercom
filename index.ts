@@ -2103,7 +2103,8 @@ Usage:
             const preview = pendingAskPreview(message);
             const elapsedSeconds = Math.max(0, Math.floor((now - receivedAt) / 1000));
             const sender = from.name ? `${from.name} (${formatSessionTarget(from, pendingAsks.map((ask) => ask.from))})` : from.id;
-            return `- ${sender} · ${message.id} · ${elapsedSeconds}s ago · ${preview}`;
+            const replyTo = JSON.stringify(message.id);
+            return `- ${sender} · replyTo: ${replyTo} · ${elapsedSeconds}s ago · ${preview}\n  Reply: intercom({ action: "reply", replyTo: ${replyTo}, message: "..." })`;
           });
           return {
             content: [{ type: "text", text: `**Pending asks:**\n${lines.join("\n")}` }],

@@ -2755,6 +2755,8 @@ test("pending output expands subagent supervisor asks", { concurrency: false }, 
     }, new AbortController().signal, undefined, harness.ctx);
 
     const text = result.content[0]?.text ?? "";
+    assert.match(text, /replyTo: "supervisor-pending-ask"/);
+    assert.match(text, /intercom\(\{ action: "reply", replyTo: "supervisor-pending-ask", message: "\.\.\." \}\)/);
     assert.match(text, /supervisor decision/);
     assert.match(text, /run=78f659a3/);
     assert.match(text, /agent=worker/);

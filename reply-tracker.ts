@@ -24,13 +24,13 @@ function tooShortSenderTargetMessage(contexts: IntercomContext[], to: string): s
   }
   const matchingIds = new Set(resolution.matches.map((session) => session.id));
   const matches = contexts.filter((context) => matchingIds.has(context.from.id));
-  return `Pending ask target "${to}" is too short. Use one of these targets or pass replyTo: ${pendingSenderOptions(matches, contexts)}.`;
+  return `Pending ask target "${to}" is too short. Use one of: ${pendingSenderOptions(matches, contexts)}.`;
 }
 
 function pendingSenderOptions(contexts: IntercomContext[], allContexts: IntercomContext[] = contexts): string {
   const allSenders = allContexts.map((context) => context.from);
   return contexts
-    .map((context) => `${context.from.name || shortSessionId(context.from.id)} (${formatSessionTarget(context.from, allSenders)}, replyTo: ${context.message.id})`)
+    .map((context) => `${context.from.name || shortSessionId(context.from.id)}: to: ${JSON.stringify(formatSessionTarget(context.from, allSenders))} or replyTo: ${JSON.stringify(context.message.id)}`)
     .join(", ");
 }
 
@@ -145,7 +145,7 @@ export class ReplyTracker {
         return matches[0]!;
       }
       if (matches.length > 1) {
-        throw new Error(`Multiple pending asks from \"${options.to}\" — use one of these targets or pass replyTo: ${pendingSenderOptions(matches, contexts)}.`);
+        throw new Error(`Multiple pending asks from \"${options.to}\" — use one of: ${pendingSenderOptions(matches, contexts)}.`);
       }
       throw new Error(`No pending ask from \"${options.to}\"`);
     }

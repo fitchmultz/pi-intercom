@@ -93,7 +93,7 @@ Read `references/peer-sessions.md` before starting a new visible peer session. S
 - No other sessions: do not invent a target. Start a peer only if the optional visible-peer rule holds.
 - `Session not found`: run `list`, choose the exact displayed target, then retry if still useful.
 - `Already waiting for a reply`: wait for the current ask, use `send` for non-blocking context, or continue local work.
-- Multiple pending asks: run `pending`, then `reply` with `to` or `replyTo`.
+- Multiple pending asks: run `pending`, then use its copy-ready `reply` call or disambiguate with the displayed `to` or `replyTo` value.
 - Ask timeout: summarize the blocked decision and continue only with safe local work.
 - Busy non-interactive recipient auto-reply: it cannot respond while running; use subagent controls or wait.
 

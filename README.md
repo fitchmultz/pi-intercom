@@ -364,7 +364,7 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 
 **`reply`** — Replies to the current intercom-triggered message if there is one. Otherwise it falls back to the single unresolved inbound ask. If multiple asks are pending, pass `to` or inspect them with `pending` first. Under the hood this is still a normal `send` with the exact `replyTo` value.
 
-**`pending`** — Lists unresolved inbound asks with sender, message ID, elapsed time, and a short preview. For `pi-subagents` supervisor asks, the preview expands the run id, agent, child intercom target, and question so the parent can reply without guessing. Useful when replying after the original triggered turn.
+**`pending`** — Lists unresolved inbound asks with sender, elapsed time, a labeled `replyTo` ID, and a copy-ready `intercom({ action: "reply", ... })` call. For `pi-subagents` supervisor asks, the preview expands the run id, agent, child intercom target, and question so the parent can reply without guessing. Useful when replying after the original triggered turn.
 
 **`status`** — Shows connection status, session ID, total active sessions, and the same live recipient capability rows as `list` so agents can choose `ask`, `queue`, `steer`, or avoid passive delivery without a second call.
 

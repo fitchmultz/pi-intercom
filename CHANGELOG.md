@@ -7,6 +7,9 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 ### Added
 - Ordinary sessions now receive a bounded, count-only model hint when another intercom peer is connected to the same Git repository or linked worktree. The hint is fail-open, excludes unrelated projects, and never sends a message automatically.
 
+### Changed
+- Retired the standalone package after its broker, extension, child bridge, skill, and documentation moved into `pi-subagents`; this manifest is now private to prevent further standalone publication.
+
 ### Fixed
 - Pending asks now label their `replyTo` IDs and include copy-ready reply calls; ambiguous target errors list valid `to` and `replyTo` values separately.
 
